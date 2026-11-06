@@ -100,6 +100,7 @@ TEST(RuntimeLaunch, RoundTripFullConfigurationAndWideIds)
     source.camera.eye              = Vec3(3, 2, 4);
     source.camera.orthographic     = true;
     source.run.followWindow        = false;
+    source.run.fullscreen          = false;
     source.run.presentMode         = RHIPresentMode::eMailbox;
     source.run.rhiMode             = RHIExecutionMode::eInline;
     source.animationEnabled        = false;
@@ -116,12 +117,34 @@ TEST(RuntimeLaunch, RoundTripFullConfigurationAndWideIds)
     EXPECT_EQ(loaded.camera.eye, source.camera.eye);
     EXPECT_TRUE(loaded.camera.orthographic);
     EXPECT_FALSE(loaded.run.followWindow);
+    EXPECT_FALSE(loaded.run.fullscreen);
     EXPECT_EQ(loaded.run.rhiMode, RHIExecutionMode::eInline);
     EXPECT_EQ(loaded.engineConfiguration, source.engineConfiguration);
     EXPECT_FALSE(loaded.animationEnabled);
     std::string encodedAgain;
     ASSERT_TRUE(EncodeRuntimeLaunchSettings(loaded, encodedAgain, error)) << error;
     EXPECT_EQ(encodedAgain, json);
+}
+
+TEST(RuntimeLaunch, OlderSetupsDefaultToFullscreenAndRejectInvalidFullscreenFields)
+{
+    std::string json;
+    std::string error;
+    ASSERT_TRUE(EncodeRuntimeLaunchSettings(Fixture(), json, error));
+    const std::string field    = "\"fullscreen\":true,";
+    const size_t      position = json.find(field);
+    ASSERT_NE(position, std::string::npos);
+    json.erase(position, field.size());
+    RuntimeLaunchSettings loaded;
+    loaded.run.fullscreen = false;
+    ASSERT_TRUE(DecodeRuntimeLaunchSettings(json, loaded, error)) << error;
+    EXPECT_TRUE(loaded.run.fullscreen);
+    json.insert(position, "\"fullscreen\":false,");
+    ASSERT_TRUE(DecodeRuntimeLaunchSettings(json, loaded, error)) << error;
+    EXPECT_FALSE(loaded.run.fullscreen);
+    json.insert(position, "\"fullscreen\":true,");
+    EXPECT_FALSE(DecodeRuntimeLaunchSettings(json, loaded, error));
+    EXPECT_FALSE(loaded.run.fullscreen);
 }
 
 TEST(RuntimeLaunch, RejectedInputPreservesPreviousSetup)

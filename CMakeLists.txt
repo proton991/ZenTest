@@ -137,42 +137,9 @@ add_executable(SmartPtrTest
 )
 
 
-if(ZEN_BUILD_ASSET_TOOLS)
-add_executable(scene_renderer_demo
-        SceneRegression/SceneRenderer/SceneRendererDemo.cpp
-        SceneRegression/SceneRenderer/SceneRendererDemoProfiling.cpp
-        SceneRegression/SceneRenderer/SceneRendererDemoVoxelCapture.cpp
-        SceneRegression/SceneRenderer/SceneRendererDemoLightingCapture.cpp
-        SceneRegression/SceneRenderer/SceneRendererDemo.h)
-target_link_libraries(scene_renderer_demo ZenEngineAssetTools)
-
-# The optional runtime overlay.
-if (ZEN_BUILD_RUNTIME_UI)
-    target_sources(scene_renderer_demo PRIVATE
-        SceneRegression/SceneRenderer/SceneRendererDemoUI.cpp
-        SceneRegression/SceneRenderer/SceneRendererDemoModels.cpp)
-    target_compile_definitions(scene_renderer_demo PRIVATE ZEN_RUNTIME_UI=1)
-    target_link_libraries(scene_renderer_demo ZenRuntimeUI)
-
-    add_executable(SceneModelSwitchTest
-        SceneRegression/SceneRenderer/SceneModelSwitchTests.cpp
-        SceneRegression/SceneRenderer/SceneRendererDemo.cpp
-        SceneRegression/SceneRenderer/SceneRendererDemoModels.cpp
-        SceneRegression/SceneRenderer/SceneRendererDemoUI.cpp
-        SceneRegression/SceneRenderer/SceneRendererDemoProfiling.cpp
-        SceneRegression/SceneRenderer/SceneRendererDemoVoxelCapture.cpp
-        SceneRegression/SceneRenderer/SceneRendererDemoLightingCapture.cpp)
-    target_include_directories(SceneModelSwitchTest PRIVATE SceneRegression/SceneRenderer)
-    target_compile_definitions(SceneModelSwitchTest PRIVATE ZEN_RUNTIME_UI=1 ZEN_SCENE_MODEL_TEST=1)
-    target_link_libraries(SceneModelSwitchTest PRIVATE ZenRuntimeUI ZenVulkanTestMain ZenEngineAssetTools)
-    add_test(NAME SceneModelSwitchTest COMMAND SceneModelSwitchTest)
-    set_tests_properties(SceneModelSwitchTest PROPERTIES LABELS "vulkan;integration" TIMEOUT 120)
-endif ()
-
-endif()
-
 # Native Cone visibility regression, isolated from suite-global Vulkan fixtures.
-add_executable(ConeVoxelGIIntegrationTest CommonTest/ConeVoxelGIIntegrationTests.cpp)
+add_executable(ConeVoxelGIIntegrationTest CommonTest/ConeVoxelGIIntegrationTests.cpp
+    CommonTest/VoxelReflectanceIntegrationTests.cpp)
 target_link_libraries(ConeVoxelGIIntegrationTest PRIVATE ZenCore ZenVulkanTestMain)
 add_dependencies(ConeVoxelGIIntegrationTest SpvShaders)
 

@@ -24,8 +24,10 @@ ctest --test-dir build -L unit --output-on-failure
 
 Native and Vulkan integration suites require a display, compatible GPU and Vulkan
 validation layers. `SDL3WindowProbe` remains a separately configured Windows probe;
-see its README. `SceneRegression` retains the legacy viewer solely as a test fixture
-and capture driver (`scene_renderer_demo` preserves existing automation commands).
+see its README. Application rendering and profiling use the engine's standalone
+`ZenApp` target with a prepared `.zenrender` setup. `MakeRuntimeFixture` creates a
+small package/setup for native startup checks. The retired scene demo, its UI and
+its dedicated integration tests are no longer built.
 Python test modules run through CTest with the engine tools on `PYTHONPATH`.
 The coverage-arithmetic script is also runnable directly.
 

@@ -135,6 +135,7 @@ TEST_P(EditorRendering, PlayWindowReusesSceneAndRestoresAfterPauseResizeAndQuit)
     RHITexture*                     image      = editor.GetViewport().GetRenderView().color;
     const uint64_t                  generation = editor.GetScene().GetGeneration();
     runtime::RuntimeWindowSettings& run        = editor.GetRunSettings();
+    run.fullscreen                             = false;
     run.windowWidth                            = 320;
     run.windowHeight                           = 240;
     run.renderWidth                            = 96;
@@ -271,6 +272,7 @@ TEST_P(EditorRendering, PlayDiscardsPausedWheelInput)
     ASSERT_TRUE(editor.Init());
     ASSERT_TRUE(editor.Load(Fixture("inspection.gltf")));
     runtime::RuntimeWindowSettings& run = editor.GetRunSettings();
+    run.fullscreen                      = false;
     run.windowWidth                     = 320;
     run.windowHeight                    = 240;
     run.vsync                           = false;
@@ -302,6 +304,7 @@ TEST_P(EditorRendering, PlayDiscardsSpaceTypedWhileDiagnosticsCaptureKeyboard)
     ASSERT_TRUE(editor.Init());
     ASSERT_TRUE(editor.Load(Fixture("inspection.gltf")));
     runtime::RuntimeWindowSettings& run = editor.GetRunSettings();
+    run.fullscreen                      = false;
     run.windowWidth                     = 320;
     run.windowHeight                    = 240;
     run.vsync                           = false;
@@ -351,6 +354,7 @@ TEST_P(EditorRendering, PlayPreservesAnimatedCameraOnReturnAndNavigation)
     editor.GetScene().Get()->scene->GetAssetData().animations.push_back(std::move(animation));
     ASSERT_TRUE(editor.GetViewport().GetSceneRendering().GetScene()->SetAnimation(0, false));
     runtime::RuntimeWindowSettings& run = editor.GetRunSettings();
+    run.fullscreen                      = false;
     run.windowWidth                     = 320;
     run.windowHeight                    = 240;
     run.vsync                           = false;
@@ -433,6 +437,7 @@ TEST_P(EditorRendering, PlayFirstFrameMatchesEditorForPBRDepthAndGI)
         const rc::RenderScene*          scene    = editor.GetViewport().GetRenderScene();
         const rc::VoxelGIRenderer*      gi       = device.GetRendererServer()->RequestVoxelGI();
         runtime::RuntimeWindowSettings& run      = editor.GetRunSettings();
+        run.fullscreen                           = false;
         run.windowWidth                          = 320;
         run.windowHeight                         = 240;
         run.renderWidth                          = 96;

@@ -37,6 +37,22 @@ TEST(WindowPlatform, SharedLifetimeAndIndependentCloseRequests)
     EXPECT_FALSE(third.ShouldClose());
 }
 
+TEST(WindowPlatform, FullscreenRestoresWindowedExtent)
+{
+    NativeWindow window({"fullscreen", true, 640, 480, 0, false});
+    window.Show();
+    const WindowExtent extent = window.GetExtent2D();
+    ASSERT_FALSE(window.IsFullscreen());
+    ASSERT_TRUE(window.SetFullscreen(true));
+    EXPECT_TRUE(window.IsFullscreen());
+    EXPECT_GT(window.GetFramebufferExtent().width, 0u);
+    EXPECT_GT(window.GetFramebufferExtent().height, 0u);
+    ASSERT_TRUE(window.SetFullscreen(false));
+    EXPECT_FALSE(window.IsFullscreen());
+    EXPECT_EQ(window.GetExtent2D().width, extent.width);
+    EXPECT_EQ(window.GetExtent2D().height, extent.height);
+}
+
 TEST(WindowPlatform, TitleGeometryUsesWindowCoordinates)
 {
     NativeWindow window({"title geometry", true, 800, 600, 0, false});

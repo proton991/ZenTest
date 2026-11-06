@@ -9,13 +9,6 @@ target_link_libraries(UIDrawPacketTest PRIVATE ZenImGui gtest_main)
 add_test(NAME UIDrawPacketTest COMMAND UIDrawPacketTest)
 set_tests_properties(UIDrawPacketTest PROPERTIES LABELS "unit" TIMEOUT 120)
 
-if (ZEN_BUILD_RUNTIME_UI)
-  add_executable(RuntimeUIIntegrationTest RuntimeUIIntegrationTests.cpp)
-  target_link_libraries(RuntimeUIIntegrationTest PRIVATE ZenRuntimeUI ZenVulkanTestMain)
-  add_test(NAME RuntimeUIIntegrationTest COMMAND RuntimeUIIntegrationTest)
-  set_tests_properties(RuntimeUIIntegrationTest PROPERTIES LABELS "vulkan;integration" TIMEOUT 120)
-endif ()
-
 if (ZEN_WINDOW_BACKEND STREQUAL "SDL3")
   add_executable(UIPlatformTest UIPlatformTests.cpp)
   target_link_libraries(UIPlatformTest PRIVATE ZenImGui ZenWindowBackendInternal gtest_main)
