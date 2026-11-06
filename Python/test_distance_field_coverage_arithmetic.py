@@ -14,10 +14,12 @@ import math
 from pathlib import Path
 import random
 import struct
+import unittest
 
 
 EPSILON = 2.0 ** -23
-ROOT = Path(__file__).resolve().parents[2]
+SAMPLES = 20_000
+SEED = 0xB12E11
 
 
 def f32(value: float) -> float:
@@ -135,16 +137,23 @@ def constant_alpha_case(points: list[tuple[float, float]]) -> dict:
     return result
 
 
+class CoverageArithmeticTest(unittest.TestCase):
+    def test_corrected_bounds_enclose_every_sample(self):
+        points = barycentrics(SAMPLES, SEED)
+        for case in (uv_cancellation_case(points), constant_alpha_case(points)):
+            self.assertEqual(set(case["modes"]), {"fused", "separate"})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--samples", type=int, default=20_000)
+    parser.add_argument("--samples", type=int, default=SAMPLES)
     parser.add_argument("--output", type=Path,
-                        default=ROOT / "build/compute-gi/brixelizer-execution/coverage-arithmetic-regression.json")
+                        default=Path("build/compute-gi/brixelizer-execution/coverage-arithmetic-regression.json"))
     arguments = parser.parse_args()
-    points = barycentrics(arguments.samples, 0xB12E11)
+    points = barycentrics(arguments.samples, SEED)
     report = {
         "scope": "CPU float32 arithmetic regression; native GLSL and coverage fixtures remain required",
-        "seed": 0xB12E11,
+        "seed": SEED,
         "uv_cancellation": uv_cancellation_case(points),
         "constant_alpha_cutoff": constant_alpha_case(points),
         "passed": True,

@@ -29,4 +29,5 @@ and capture driver (`scene_renderer_demo` preserves existing automation commands
 Python test modules run through CTest with the engine tools on `PYTHONPATH`.
 The coverage-arithmetic script is also runnable directly.
 
-Commit and push changes here separately, then update the ZenEngine submodule pin.
+Submodule checkouts start on a detached HEAD, so run `git switch main` before committing.
+Push changes here separately; ZenEngine uses the latest `main` from its next configure.

@@ -6,7 +6,7 @@ value types, links the current ImGui source with
 its official SDL3 platform backend, and exercises real Windows/Vulkan integration.
 No ZenCore, GLFW, SDL renderer, or ImGui Vulkan renderer is linked.
 
-Read [the evaluation](../../Doc/SDL3WindowBackendEvaluation.md) for the decision,
+Read [the evaluation](https://github.com/proton991/ZenEngine/blob/main/Doc/SDL3WindowBackendEvaluation.md) for the decision,
 proposed engine API boundary, platform limitations, and migration sequence.
 
 Windows and macOS are required migration targets; Linux is deferred. This probe
@@ -65,4 +65,4 @@ The original probe inherited the minimal `NativeWindow` interface. Production
 migration made that type the concrete engine facade, so this standalone probe
 now uses only its value types. Production acceptance is covered by
 `WindowPlatformTest`, `UIPlatformTest`, `EditorWindowChromeTest`, and the existing
-RHI/UI integration tests; see [migration status](../../Doc/SDL3Migration.md).
+RHI/UI integration tests; see [migration status](https://github.com/proton991/ZenEngine/blob/main/Doc/SDL3Migration.md).

@@ -4,13 +4,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   project(ZenTest LANGUAGES C CXX)
   set(ZEN_ENGINE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH "ZenEngine checkout")
-  if(NOT EXISTS "${ZEN_ENGINE_SOURCE_DIR}/ZenCore/CMakeLists.txt")
+  if(NOT EXISTS "${ZEN_ENGINE_SOURCE_DIR}/ZenSubproject.cmake")
     message(FATAL_ERROR "Set ZEN_ENGINE_SOURCE_DIR to a ZenEngine checkout")
   endif()
-  set(ZEN_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
-  set(ZEN_EXTERNAL_SUBPROJECT ON)
-  include(CTest)
-  add_subdirectory("${ZEN_ENGINE_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/ZenEngine")
+  include("${ZEN_ENGINE_SOURCE_DIR}/ZenSubproject.cmake")
 endif()
 set(ZEN_TEST_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 if(NOT BUILD_TESTING)
@@ -18,7 +15,6 @@ if(NOT BUILD_TESTING)
 endif()
 add_library(ZenVulkanTestMain STATIC CommonTest/VulkanTestMain.cpp)
 target_link_libraries(ZenVulkanTestMain PUBLIC ZenCore gtest)
-if (BUILD_TESTING)
 add_executable(RuntimeLaunchTest CommonTest/RuntimeLaunchTests.cpp)
 target_link_libraries(RuntimeLaunchTest PRIVATE ZenCore gtest_main)
 add_test(NAME RuntimeLaunchTest COMMAND RuntimeLaunchTest)
@@ -90,7 +86,6 @@ target_compile_definitions(VulkanRHITest PRIVATE RDG_REFLECTION_TEST_PATH="${RDG
 target_compile_definitions(VulkanRHIIntegrationTest PRIVATE RDG_REFLECTION_TEST_PATH="${RDG_REFLECTION_TEST_PATH}")
 
 add_executable(RenderCoreTest
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/DebugVisualization.cpp
     RenderCoreTest/RenderCoreTests.cpp
     RenderCoreTest/RDGMetricsTests.cpp
     RenderCoreTest/RDGProfilingTests.cpp
@@ -98,40 +93,6 @@ add_executable(RenderCoreTest
     RenderCoreTest/RHIGPUFrameTimingTests.cpp
     RenderCoreTest/VoxelResourcePlanningTests.cpp
     RenderCoreTest/VoxelGISettingsTests.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Memory/Memory.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RHI/DynamicRHI.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RHI/RHICommandList.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RHI/RHIResource.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RHI/RHICommandListExecutor.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RHI/RHIGPUFrameTiming.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RHI/RHIThread.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/RenderDevice.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/SpatialTextureSampling.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/RenderObject.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/FrameBufferRing.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/RenderSubmissionHistory.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/ShaderProgram.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/TextureManager.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/RenderGraph.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/RDGMetrics.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/RDGDebugSnapshot.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/StagingUploadQueue.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/RDGPassCompiler.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/RDGResourceManager.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/SceneLighting.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/VoxelResourcePlanning.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/VoxelGISettings.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/VoxelizerBase.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/VoxelGIRenderer.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/HybridGIRenderer.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/ScreenProbeGather.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/SceneRayQuery.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/LightFixtureMasks.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/DistanceFieldScene.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/SceneShadowRenderer.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/DeferredLightingRenderer.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/SkyboxRenderer.cpp
-    ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source/Graphics/RenderCore/V2/RenderSceneResources.cpp
 )
 target_include_directories(RenderCoreTest PRIVATE
     ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Include
@@ -139,7 +100,7 @@ target_include_directories(RenderCoreTest PRIVATE
 target_compile_definitions(RenderCoreTest PRIVATE
     $<TARGET_PROPERTY:ZenCore,INTERFACE_COMPILE_DEFINITIONS>
 )
-target_link_libraries(RenderCoreTest PRIVATE gtest_main spdlog::spdlog gli glm spirv-reflect)
+target_link_libraries(RenderCoreTest PRIVATE ZenRenderCoreTestSources gtest_main spdlog::spdlog gli glm spirv-reflect)
 # The shared fake-backend test translation unit exceeds the standard COFF section limit.
 set_source_files_properties(RenderCoreTest/RenderCoreTests.cpp PROPERTIES
     COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:MSVC>:/bigobj>")
@@ -172,7 +133,6 @@ add_executable(SmartPtrTest
     SmartPtrTest/IntrusivePtrTests.cpp
     SmartPtrTest/RefCountPtrTests.cpp
 )
-endif ()
 
 
 if(ZEN_BUILD_ASSET_TOOLS)
@@ -184,7 +144,7 @@ add_executable(scene_renderer_demo
         SceneRegression/SceneRenderer/SceneRendererDemo.h)
 target_link_libraries(scene_renderer_demo ZenEngineAssetTools)
 
-# The optional runtime overlay; ZenUI is configured before the samples.
+# The optional runtime overlay.
 if (ZEN_BUILD_RUNTIME_UI)
     target_sources(scene_renderer_demo PRIVATE
         SceneRegression/SceneRenderer/SceneRendererDemoUI.cpp
@@ -192,27 +152,24 @@ if (ZEN_BUILD_RUNTIME_UI)
     target_compile_definitions(scene_renderer_demo PRIVATE ZEN_RUNTIME_UI=1)
     target_link_libraries(scene_renderer_demo ZenRuntimeUI)
 
-    if (BUILD_TESTING)
-        add_executable(SceneModelSwitchTest
-            SceneRegression/SceneRenderer/SceneModelSwitchTests.cpp
-            SceneRegression/SceneRenderer/SceneRendererDemo.cpp
-            SceneRegression/SceneRenderer/SceneRendererDemoModels.cpp
-            SceneRegression/SceneRenderer/SceneRendererDemoUI.cpp
-            SceneRegression/SceneRenderer/SceneRendererDemoProfiling.cpp
-            SceneRegression/SceneRenderer/SceneRendererDemoVoxelCapture.cpp
-            SceneRegression/SceneRenderer/SceneRendererDemoLightingCapture.cpp)
-        target_include_directories(SceneModelSwitchTest PRIVATE SceneRegression/SceneRenderer)
-        target_compile_definitions(SceneModelSwitchTest PRIVATE ZEN_RUNTIME_UI=1 ZEN_SCENE_MODEL_TEST=1)
-        target_link_libraries(SceneModelSwitchTest PRIVATE ZenRuntimeUI ZenVulkanTestMain ZenEngineAssetTools)
-        add_test(NAME SceneModelSwitchTest COMMAND SceneModelSwitchTest)
-        set_tests_properties(SceneModelSwitchTest PROPERTIES LABELS "vulkan;integration" TIMEOUT 120)
-    endif ()
+    add_executable(SceneModelSwitchTest
+        SceneRegression/SceneRenderer/SceneModelSwitchTests.cpp
+        SceneRegression/SceneRenderer/SceneRendererDemo.cpp
+        SceneRegression/SceneRenderer/SceneRendererDemoModels.cpp
+        SceneRegression/SceneRenderer/SceneRendererDemoUI.cpp
+        SceneRegression/SceneRenderer/SceneRendererDemoProfiling.cpp
+        SceneRegression/SceneRenderer/SceneRendererDemoVoxelCapture.cpp
+        SceneRegression/SceneRenderer/SceneRendererDemoLightingCapture.cpp)
+    target_include_directories(SceneModelSwitchTest PRIVATE SceneRegression/SceneRenderer)
+    target_compile_definitions(SceneModelSwitchTest PRIVATE ZEN_RUNTIME_UI=1 ZEN_SCENE_MODEL_TEST=1)
+    target_link_libraries(SceneModelSwitchTest PRIVATE ZenRuntimeUI ZenVulkanTestMain ZenEngineAssetTools)
+    add_test(NAME SceneModelSwitchTest COMMAND SceneModelSwitchTest)
+    set_tests_properties(SceneModelSwitchTest PROPERTIES LABELS "vulkan;integration" TIMEOUT 120)
 endif ()
 
 endif()
 
 # Native Cone visibility regression, isolated from suite-global Vulkan fixtures.
-if (BUILD_TESTING)
 add_executable(ConeVoxelGIIntegrationTest CommonTest/ConeVoxelGIIntegrationTests.cpp)
 target_link_libraries(ConeVoxelGIIntegrationTest PRIVATE ZenCore ZenVulkanTestMain)
 add_dependencies(ConeVoxelGIIntegrationTest SpvShaders)
@@ -222,35 +179,27 @@ target_link_libraries(FlatHashMapTest ZenCore gtest_main)
 target_link_libraries(SmartPtrTest ZenCore gtest_main)
 target_link_libraries(CommonTest PRIVATE ZenCore gtest_main)
 target_include_directories(CommonTest PRIVATE ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source)
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if (Python3_Interpreter_FOUND)
+    add_test(NAME NoEngineExceptions COMMAND ${Python3_EXECUTABLE} ${ZEN_ENGINE_SOURCE_DIR}/tools/check_no_exceptions.py)
+    set_tests_properties(NoEngineExceptions PROPERTIES LABELS "unit;policy" TIMEOUT 30)
 endif ()
+foreach(TEST_TARGET CommonTest SmartPtrTest FlatHashMapTest LRUCacheTest
+        InputControllerTest ConfigLoaderTest VulkanRHITest RenderCoreTest)
+    add_test(NAME ${TEST_TARGET} COMMAND ${TEST_TARGET})
+    set_tests_properties(${TEST_TARGET} PROPERTIES LABELS "unit" TIMEOUT 120)
+endforeach()
+add_test(NAME VulkanRHIIntegrationTest COMMAND VulkanRHIIntegrationTest)
+set_tests_properties(VulkanRHIIntegrationTest PROPERTIES LABELS "vulkan;integration" TIMEOUT 300)
 
-
-# Applications
-
-if (BUILD_TESTING)
-    find_package(Python3 COMPONENTS Interpreter QUIET)
-    if (Python3_Interpreter_FOUND)
-        add_test(NAME NoEngineExceptions COMMAND ${Python3_EXECUTABLE} ${ZEN_ENGINE_SOURCE_DIR}/tools/check_no_exceptions.py)
-        set_tests_properties(NoEngineExceptions PROPERTIES LABELS "unit;policy" TIMEOUT 30)
-    endif ()
-    foreach(TEST_TARGET CommonTest SmartPtrTest FlatHashMapTest LRUCacheTest
-            InputControllerTest ConfigLoaderTest VulkanRHITest RenderCoreTest)
-        add_test(NAME ${TEST_TARGET} COMMAND ${TEST_TARGET})
-        set_tests_properties(${TEST_TARGET} PROPERTIES LABELS "unit" TIMEOUT 120)
-    endforeach()
-    add_test(NAME VulkanRHIIntegrationTest COMMAND VulkanRHIIntegrationTest)
-    set_tests_properties(VulkanRHIIntegrationTest PROPERTIES LABELS "vulkan;integration" TIMEOUT 300)
-endif ()
-
-if (BUILD_TESTING)
-    # Native acceptance tests deliberately inspect the private window adapter.
-    target_include_directories(VulkanRHIIntegrationTest PRIVATE ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source)
-    target_link_libraries(VulkanRHIIntegrationTest PRIVATE ZenWindowBackendInternal)
-    add_executable(WindowPlatformTest CommonTest/WindowPlatformTests.cpp)
-    target_link_libraries(WindowPlatformTest PRIVATE ZenCore ZenWindowBackendInternal ZenVulkanTestMain)
-    add_test(NAME WindowPlatformTest COMMAND WindowPlatformTest)
-    set_tests_properties(WindowPlatformTest PROPERTIES LABELS "native" TIMEOUT 60)
-endif ()
+# Native acceptance tests deliberately inspect the private window adapter.
+target_include_directories(VulkanRHIIntegrationTest PRIVATE ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source)
+target_link_libraries(VulkanRHIIntegrationTest PRIVATE ZenWindowBackendInternal)
+add_executable(WindowPlatformTest CommonTest/WindowPlatformTests.cpp)
+target_link_libraries(WindowPlatformTest PRIVATE ZenCore ZenWindowBackendInternal ZenVulkanTestMain)
+add_test(NAME WindowPlatformTest COMMAND WindowPlatformTest)
+set_tests_properties(WindowPlatformTest PROPERTIES LABELS "native" TIMEOUT 60)
 
 if(TARGET ZenUI)
   add_subdirectory(ZenUI)
