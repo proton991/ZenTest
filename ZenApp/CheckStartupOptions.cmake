@@ -1,0 +1,27 @@
+# Exercise the executable parser without creating a window or initializing Vulkan.
+if(NOT EXISTS "${ZEN_APP}")
+  message(FATAL_ERROR "Build ZenApp before running startup-option checks")
+endif()
+
+execute_process(COMMAND "${ZEN_APP}" --help RESULT_VARIABLE code OUTPUT_VARIABLE output ERROR_VARIABLE error)
+string(FIND "${output}" "--gpu-culling=0|1" found)
+if(NOT code EQUAL 0 OR found EQUAL -1)
+  message(FATAL_ERROR "ZenApp help does not document the culling switch: ${output}${error}")
+endif()
+
+foreach(option IN ITEMS "--gpu-culling=0" "--gpu-culling=1")
+  execute_process(COMMAND "${ZEN_APP}" "${option}" RESULT_VARIABLE code OUTPUT_VARIABLE output ERROR_VARIABLE error)
+  string(FIND "${error}" "Specify --setup=<file.zenrender>" found)
+  if(NOT code EQUAL 2 OR found EQUAL -1)
+    message(FATAL_ERROR "Valid ${option} was not accepted before setup validation: ${output}${error}")
+  endif()
+endforeach()
+
+foreach(option IN ITEMS "--gpu-culling=" "--gpu-culling=2" "--gpu-culling=-1" "--gpu-culling=true" "--gpu-culling=10")
+  execute_process(COMMAND "${ZEN_APP}" "${option}" RESULT_VARIABLE code OUTPUT_VARIABLE output ERROR_VARIABLE error)
+  string(FIND "${error}" "--gpu-culling requires 0 or 1" found)
+  if(NOT code EQUAL 2 OR found EQUAL -1)
+    message(FATAL_ERROR "Invalid ${option} did not fail toggle validation: ${output}${error}")
+  endif()
+endforeach()
+message(STATUS "ZenApp culling startup-option checks passed")

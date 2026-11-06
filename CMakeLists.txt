@@ -142,6 +142,19 @@ add_executable(ConeVoxelGIIntegrationTest CommonTest/ConeVoxelGIIntegrationTests
     CommonTest/VoxelReflectanceIntegrationTests.cpp)
 target_link_libraries(ConeVoxelGIIntegrationTest PRIVATE ZenCore ZenVulkanTestMain)
 add_dependencies(ConeVoxelGIIntegrationTest SpvShaders)
+set(SCENE_CULLING_READBACK_SHADERS)
+foreach(SHADER scene_gbuffer_readback scene_indirect_readback)
+  set(OUTPUT "${ZEN_ENGINE_SOURCE_DIR}/Data/SpvShaders/Tests/${SHADER}.comp.spv")
+  add_custom_command(OUTPUT "${OUTPUT}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${ZEN_ENGINE_SOURCE_DIR}/Data/SpvShaders/Tests"
+    COMMAND ${GLSL_VALIDATOR} --target-env spirv1.3 -V
+            "${CMAKE_CURRENT_SOURCE_DIR}/CommonTest/Shaders/${SHADER}.comp"
+            -o "${OUTPUT}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/CommonTest/Shaders/${SHADER}.comp" VERBATIM)
+  list(APPEND SCENE_CULLING_READBACK_SHADERS "${OUTPUT}")
+endforeach()
+add_custom_target(SceneCullingTestShaders DEPENDS ${SCENE_CULLING_READBACK_SHADERS})
+add_dependencies(ConeVoxelGIIntegrationTest SceneCullingTestShaders)
 
 target_link_libraries(ThreadPoolTest ZenCore)
 target_link_libraries(FlatHashMapTest ZenCore gtest_main)

@@ -4,6 +4,7 @@
 #include "Graphics/RenderCore/V2/RenderDevice.h"
 #include "Graphics/RenderCore/V2/Renderer/RendererServer.h"
 #include "Graphics/RenderCore/V2/ShaderProgram.h"
+#include "Graphics/RenderCore/V2/Renderer/SceneCulling.h"
 #include "Graphics/RenderCore/V2/RenderGraph/RenderGraph.h"
 #include "Graphics/VulkanRHI/VulkanCommandList.h"
 #include "Graphics/VulkanRHI/VulkanDevice.h"
@@ -12,6 +13,7 @@
 #include "Platform/NativeWindow.h"
 #include <gtest/gtest.h>
 #include <atomic>
+#include <algorithm>
 #include <tuple>
 
 namespace
@@ -262,7 +264,9 @@ TEST_P(VulkanPresentationReviewTest, RendererInitializationWarmsRegisteredComput
     device->InitializeRendererServer();
     const HeapVector<NameID>&  warmups = programs.GetInitializationWarmups();
     const PipelineCacheMetrics warmed  = device->GetPipelineCacheMetrics();
-    EXPECT_EQ(warmups.size(), 3u);
+    const bool                 culling = SupportsGBufferCulling(device->GetGPUInfo());
+    EXPECT_EQ(warmups.size(), culling ? 4u : 3u);
+    EXPECT_EQ(std::find(warmups.begin(), warmups.end(), NameID("SceneFrustumCullSP")) != warmups.end(), culling);
     EXPECT_EQ(warmed.creations, warmups.size());
     for (NameID name : warmups)
     {
@@ -293,6 +297,69 @@ TEST_P(VulkanPresentationReviewTest, RegisteredProgramsCreateShadersAndRequireRa
     }
     // Ray-query programs exist exactly when the device can run them.
     EXPECT_EQ(hardwarePrograms != 0, rayQuery);
+}
+
+class ScopedReportedVaryingLimits
+{
+public:
+    ScopedReportedVaryingLimits(RHIGPUInfo& info, bool vertex) :
+        m_info(info), m_vertex(info.maxVertexOutputComponents), m_fragment(info.maxFragmentInputComponents)
+    {
+        m_info.maxVertexOutputComponents  = vertex ? 64u : 128u;
+        m_info.maxFragmentInputComponents = vertex ? 128u : 79u;
+    }
+    ~ScopedReportedVaryingLimits()
+    {
+        m_info.maxVertexOutputComponents  = m_vertex;
+        m_info.maxFragmentInputComponents = m_fragment;
+    }
+
+private:
+    RHIGPUInfo& m_info;
+    uint32_t    m_vertex;
+    uint32_t    m_fragment;
+};
+
+TEST_P(VulkanPresentationReviewTest, LowReportedVaryingLimitsSkipIndirectGBufferShaderRegistration)
+{
+    // Change the engine's reported limits, leaving the physical device and its shader
+    // validation intact. Unsupported programs must be absent before module creation.
+    RHIGPUInfo&           reported = const_cast<RHIGPUInfo&>(device->GetGPUInfo());
+    ShaderProgramManager& programs = ShaderProgramManager::GetInstance();
+    for (bool vertexLimit : {true, false})
+    {
+        SCOPED_TRACE(vertexLimit);
+        ScopedReportedVaryingLimits limits(reported, vertexLimit);
+        EXPECT_FALSE(SupportsIndirectGBufferShaders(reported));
+        programs.BuildShaderPrograms(device.Get());
+        const HashMap<NameID, ShaderProgram*>& registered = programs.GetPrograms();
+        for (NameID name : {NameID("GBufferIndirectSP"), NameID("GBufferMaskedIndirectSP"), NameID("HybridReceiverIndirectSP"),
+                            NameID("HybridReceiverMaskedIndirectSP"), NameID("SceneFrustumCullSP")})
+        {
+            EXPECT_EQ(registered.find(name), registered.end()) << name.CStr();
+        }
+        for (NameID name : {NameID("GBufferSP"), NameID("GBufferMaskedSP")})
+        {
+            EXPECT_NE(registered.find(name), registered.end()) << name.CStr();
+        }
+        const HeapVector<NameID>& warmups = programs.GetInitializationWarmups();
+        EXPECT_EQ(std::find(warmups.begin(), warmups.end(), NameID("SceneFrustumCullSP")), warmups.end());
+        programs.Destroy();
+    }
+}
+
+TEST_P(VulkanPresentationReviewTest, MissingIndirectFirstInstanceSkipsCullerWarmup)
+{
+    RHIGPUInfo&           reported            = const_cast<RHIGPUInfo&>(device->GetGPUInfo());
+    const bool            supported           = reported.supportDrawIndirectFirstInstance;
+    ShaderProgramManager& programs            = ShaderProgramManager::GetInstance();
+    reported.supportDrawIndirectFirstInstance = false;
+    programs.BuildShaderPrograms(device.Get());
+    reported.supportDrawIndirectFirstInstance = supported;
+    const HeapVector<NameID>& warmups         = programs.GetInitializationWarmups();
+    EXPECT_EQ(std::find(warmups.begin(), warmups.end(), NameID("SceneFrustumCullSP")), warmups.end());
+    EXPECT_EQ(programs.RequestShaderProgram("SceneFrustumCullSP"), nullptr);
+    programs.Destroy();
 }
 
 INSTANTIATE_TEST_SUITE_P(InlineThreadedAndAsync,

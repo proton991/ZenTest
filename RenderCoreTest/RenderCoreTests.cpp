@@ -8,6 +8,7 @@
 #include "Graphics/RenderCore/V2/Renderer/RendererServer.h"
 #include "Graphics/RenderCore/V2/Renderer/RendererUtils.h"
 #include "Graphics/RenderCore/V2/Renderer/GBuffer.h"
+#include "Graphics/RenderCore/V2/Renderer/SceneCulling.h"
 #include "Graphics/RenderCore/V2/Renderer/VoxelizerBase.h"
 #include "Graphics/RenderCore/V2/Renderer/VoxelGIRenderer.h"
 #include "Graphics/RenderCore/V2/Renderer/HybridGIRenderer.h"
@@ -565,21 +566,29 @@ public:
     std::vector<RHIResource*>                       boundResources;
     std::vector<uint32_t>                           boundArrayIndices;
     std::vector<RHIBuffer*>                         indirectDraws;
-    std::vector<RHIBuffer*>                         indirectDispatches;
-    HeapVector<RHIShader*>                          indirectShaders;
-    uint32_t                                        drawCount{0};
-    uint32_t                                        dispatchCount{0};
-    RHIShader*                                      boundShader{nullptr};
-    RHIPipeline*                                    boundPipeline{nullptr};
-    HeapVector<RHIPipeline*>                        indexedPipelines;
-    HeapVector<RHIPipeline*>                        pushConstantPipelines;
-    HeapVector<std::pair<RHIShader*, glm::uvec3>>   dispatches;
-    uint32_t                                        renderingCount{0};
-    uint32_t                                        vertexBufferCount{0};
-    std::vector<RHIBuffer*>                         vertexBuffers;
-    std::vector<RHIRenderingLayout>                 renderingLayouts;
-    std::vector<std::pair<size_t, size_t>>          renderingCommandOffsets;
-    std::vector<std::array<uint32_t, 2>>            indexedDraws;
+    struct IndirectDrawCall
+    {
+        RHIBuffer* buffer;
+        uint64_t   offset;
+        uint32_t   count;
+        uint32_t   stride;
+    };
+    HeapVector<IndirectDrawCall>                  indirectDrawCalls;
+    std::vector<RHIBuffer*>                       indirectDispatches;
+    HeapVector<RHIShader*>                        indirectShaders;
+    uint32_t                                      drawCount{0};
+    uint32_t                                      dispatchCount{0};
+    RHIShader*                                    boundShader{nullptr};
+    RHIPipeline*                                  boundPipeline{nullptr};
+    HeapVector<RHIPipeline*>                      indexedPipelines;
+    HeapVector<RHIPipeline*>                      pushConstantPipelines;
+    HeapVector<std::pair<RHIShader*, glm::uvec3>> dispatches;
+    uint32_t                                      renderingCount{0};
+    uint32_t                                      vertexBufferCount{0};
+    std::vector<RHIBuffer*>                       vertexBuffers;
+    std::vector<RHIRenderingLayout>               renderingLayouts;
+    std::vector<std::pair<size_t, size_t>>        renderingCommandOffsets;
+    std::vector<std::array<uint32_t, 2>>          indexedDraws;
 
     RHICommandContextType GetContextType() override
     {
@@ -678,6 +687,7 @@ public:
                                 uint32_t   stride) override
     {
         indirectDraws.push_back(pIndirectBuffer);
+        indirectDrawCalls.push_back({pIndirectBuffer, offset, drawCount, stride});
     }
 
     void RHIDispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override
@@ -1678,6 +1688,11 @@ float RenderScene::GetInstanceOrientation(uint32_t instance) const
 const HeapVector<RenderScene::ShadowCaster>& RenderScene::GetShadowCasters() const
 {
     return sceneInputs.shadowCasters;
+}
+
+sg::AABB RenderScene::GetSubMeshWorldBounds(uint32_t instance, uint32_t) const
+{
+    return instance < sceneInputs.shadowCasters.size() ? sceneInputs.shadowCasters[instance].bounds : sg::AABB();
 }
 
 // This facade has no CPU geometry to commit; each commit stands for a changed frame.
@@ -5050,6 +5065,8 @@ TEST_F(RenderCoreTest, GBufferFollowsTheSuppliedViewAndIsNotDeclaredWhileSuspend
 
     sceneInputs = {};
 }
+
+#include "SceneCullingGraphTests.inl"
 
 TEST_F(RenderCoreTest, VoxelRadianceResourcesAreAllocatedOnlyOnDemand)
 {
