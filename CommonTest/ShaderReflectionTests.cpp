@@ -933,6 +933,116 @@ TEST(ShaderReflectionTests, AccelerationStructureUsesAnOrdinaryReadOnlyDescripto
     EXPECT_FALSE(descriptor.bindless);
 }
 
+TEST(ShaderReflectionTests, GlobalTextureHeapsRequireTheirDeclaredImageShape)
+{
+    struct HeapShape
+    {
+        uint32_t binding;
+        SpvDim   dimension;
+        uint32_t arrayed;
+    };
+    const HeapShape heaps[] = {{ZEN_BINDLESS_HEAP_BINDING_TEXTURE2D, SpvDim2D, 0},
+                               {ZEN_BINDLESS_HEAP_BINDING_TEXTURECUBE, SpvDimCube, 0},
+                               {ZEN_BINDLESS_HEAP_BINDING_TEXTURE2DARRAY, SpvDim2D, 1},
+                               {ZEN_BINDLESS_HEAP_BINDING_TEXTURECUBEARRAY, SpvDimCube, 1}};
+    for (const HeapShape& heap : heaps)
+    {
+        for (SpvDim dimension : {SpvDim1D, SpvDim2D, SpvDim3D, SpvDimCube, SpvDimRect, SpvDimBuffer, SpvDimSubpassData})
+        {
+            for (uint32_t arrayed : {0u, 1u})
+            {
+                for (uint32_t multisampled : {0u, 1u})
+                {
+                    SCOPED_TRACE(::testing::Message() << "binding=" << heap.binding << " dim=" << dimension
+                                                      << " arrayed=" << arrayed << " ms=" << multisampled);
+                    SpvReflectDescriptorBinding binding{};
+                    binding.descriptor_type  = SPV_REFLECT_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+                    binding.set              = kGlobalBindlessHeapIndex;
+                    binding.binding          = heap.binding;
+                    binding.array.dims_count = 1;
+                    binding.array.dims[0]    = SPV_REFLECT_ARRAY_DIM_RUNTIME;
+                    binding.image.dim        = dimension;
+                    binding.image.arrayed    = arrayed;
+                    binding.image.ms         = multisampled;
+                    RHIShaderResourceDescriptor descriptor{};
+                    const bool expected = dimension == heap.dimension && arrayed == heap.arrayed && multisampled == 0;
+                    EXPECT_EQ(ParseSpvReflectDescriptorBinding(binding, descriptor), expected);
+                    EXPECT_TRUE(descriptor.bindless);
+                }
+            }
+        }
+    }
+}
+
+TEST(ShaderReflectionTests, OrdinaryTextureArraysAndGlobalSamplersKeepTheirReflectionContract)
+{
+    SpvReflectDescriptorBinding binding{};
+    binding.descriptor_type  = SPV_REFLECT_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    binding.set              = kGlobalBindlessHeapIndex + 1;
+    binding.binding          = ZEN_BINDLESS_HEAP_BINDING_TEXTURE2D;
+    binding.array.dims_count = 1;
+    binding.array.dims[0]    = 3;
+    binding.image.dim        = SpvDim2D;
+    binding.image.arrayed    = 1;
+    RHIShaderResourceDescriptor descriptor{};
+    ASSERT_TRUE(ParseSpvReflectDescriptorBinding(binding, descriptor));
+    EXPECT_EQ(descriptor.type, RHIShaderResourceType::eTexture);
+    EXPECT_EQ(descriptor.arraySize, 3u);
+    EXPECT_FALSE(descriptor.bindless);
+
+    binding                  = {};
+    binding.descriptor_type  = SPV_REFLECT_DESCRIPTOR_TYPE_SAMPLER;
+    binding.set              = kGlobalBindlessHeapIndex;
+    binding.binding          = ZEN_BINDLESS_HEAP_BINDING_SAMPLER;
+    binding.array.dims_count = 1;
+    binding.array.dims[0]    = SPV_REFLECT_ARRAY_DIM_RUNTIME;
+    descriptor               = {};
+    ASSERT_TRUE(ParseSpvReflectDescriptorBinding(binding, descriptor));
+    EXPECT_EQ(descriptor.type, RHIShaderResourceType::eSampler);
+    EXPECT_TRUE(descriptor.bindless);
+}
+
+TEST(ShaderReflectionTests, ArrayHeapShadersReflectAndRejectMismatchedImageDeclarationsBeforePublication)
+{
+    for (const char* fixture : {"binding_bindless_array.comp.spv", "binding_bindless_cube_array.comp.spv"})
+    {
+        SCOPED_TRACE(fixture);
+        HeapVector<uint8_t> bytes = LoadReflectionFixture(fixture);
+        ASSERT_TRUE(HasValidSpirvStructure(bytes));
+        RHIShaderGroupSPIRVPtr spirv = MakeRefCountPtr<RHIShaderGroupSPIRV>();
+        spirv->SetStageSPIRV(RHIShaderStage::eCompute, HeapVector<uint8_t>(bytes));
+        RHIShaderGroupInfo info{};
+        ASSERT_TRUE(RHIShaderUtil::ReflectShaderGroupInfo(spirv, kNoDeviceSetLimit, info));
+        EXPECT_TRUE(ValidateShaderLayout(info, kNoDeviceSetLimit));
+
+        // Remove the array shape from OpTypeImage without changing its descriptor binding.
+        // The old heap declarations stay valid; the new array heap must reject the mismatch.
+        HeapVector<uint32_t> words(bytes.size() / sizeof(uint32_t));
+        std::memcpy(words.data(), bytes.data(), bytes.size());
+        uint32_t changed = 0;
+        for (size_t offset = 5; offset < words.size(); offset += words[offset] >> 16)
+        {
+            if ((words[offset] & 0xffffu) == SpvOpTypeImage)
+            {
+                ASSERT_GE(words[offset] >> 16, 9u);
+                if (words[offset + 5] == 1)
+                {
+                    words[offset + 5] = 0;
+                    ++changed;
+                }
+            }
+        }
+        ASSERT_GT(changed, 0u);
+        std::memcpy(bytes.data(), words.data(), bytes.size());
+        spirv->SetStageSPIRV(RHIShaderStage::eCompute, std::move(bytes));
+        RHIShaderGroupInfo rejected{};
+        rejected.vertexBindingStride = 123;
+        EXPECT_FALSE(RHIShaderUtil::ReflectShaderGroupInfo(spirv, kNoDeviceSetLimit, rejected));
+        EXPECT_TRUE(rejected.SRDTable.empty());
+        EXPECT_EQ(rejected.vertexBindingStride, 123u);
+    }
+}
+
 TEST(ShaderReflectionTests, ReflectionRejectsSetsAtOrBeyondTheDeviceLimit)
 {
     RHIShaderResourceDescriptor descriptor{};

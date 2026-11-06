@@ -153,6 +153,15 @@ TEST(VulkanShaderLayoutIntegrationTest, TessellationCapabilityAndStagesAreExplic
     ExpectShaderRejectedBeforeNativeCreation(session, evaluation);
 }
 
+TEST(VulkanShaderLayoutIntegrationTest, CubeArrayHeapShaderRequiresEnabledImageCubeArray)
+{
+    test::VulkanSession session;
+    RHIShaderCreateInfo info;
+    test::SetShaderStage(info, RHIShaderStage::eCompute, "binding_bindless_cube_array.comp.spv");
+    ScopedDisabledFeature disabled(session.rhi.GetDevice(), &VkPhysicalDeviceFeatures::imageCubeArray);
+    ExpectShaderRejectedBeforeNativeCreation(session, info);
+}
+
 TEST(VulkanShaderLayoutIntegrationTest, PatchTopologyIsRejectedBeforeNativeGraphicsCreation)
 {
     test::VulkanSession session;

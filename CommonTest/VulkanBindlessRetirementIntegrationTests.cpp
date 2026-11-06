@@ -26,6 +26,14 @@ protected:
     HeapVector<RHIShader*>               shaders;
     HeapVector<RHIPipeline*>             pipelines;
 
+    static inline uint32_t descriptorWriteCount{};
+
+    static VKAPI_ATTR void VKAPI_CALL
+    CountDescriptorWrites(VkDevice, uint32_t writeCount, const VkWriteDescriptorSet*, uint32_t, const VkCopyDescriptorSet*)
+    {
+        descriptorWriteCount += writeCount;
+    }
+
     static VKAPI_ATTR VkBool32 VKAPI_CALL Validation(VkDebugUtilsMessageSeverityFlagBitsEXT,
                                                      VkDebugUtilsMessageTypeFlagsEXT,
                                                      const VkDebugUtilsMessengerCallbackDataEXT* data,
@@ -300,9 +308,360 @@ protected:
 
         context->RHISetShaderParameters(parameters);
     }
+
+    VulkanTexture* ArrayTexture(RHITextureType type)
+    {
+        RHITextureCreateInfo info{};
+        info.type  = type;
+        info.width = info.height = 4;
+        info.arrayLayers         = type == RHITextureType::eCube ? 12u : 2u;
+        info.format              = DataFormat::eR8G8B8A8UNORM;
+        info.usageFlags.SetFlags(RHITextureUsageFlagBits::eSampled, RHITextureUsageFlagBits::eTransferDst);
+        VulkanTexture* texture = static_cast<VulkanTexture*>(session->rhi.CreateTexture(info));
+        textures.push_back(texture);
+        return texture;
+    }
+
+    RHITextureView* ArraySlice(VulkanTexture* texture, RHITextureType type, bool arrayView)
+    {
+        const uint32_t           sliceLayers = type == RHITextureType::eCube ? 6u : 1u;
+        RHITextureViewCreateInfo viewInfo{};
+        viewInfo.type           = type;
+        viewInfo.format         = texture->GetFormat();
+        viewInfo.arrayLayers    = sliceLayers;
+        viewInfo.baseArrayLayer = sliceLayers;
+        viewInfo.arrayView      = arrayView;
+        return texture->CreateView(viewInfo);
+    }
+
+    void InitializeArray(VulkanTexture* texture, RHITextureType type)
+    {
+        Transition(texture, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkImageSubresourceRange range = texture->GetVkSubresourceRange();
+        range.layerCount              = type == RHITextureType::eCube ? 6u : 1u;
+        for (uint32_t element = 0; element < 2; ++element)
+        {
+            const VkClearColorValue color{{element == 0 ? 1.0f : 0.0f, element == 1 ? 1.0f : 0.0f, 0, 1}};
+            range.baseArrayLayer = element * range.layerCount;
+            vkCmdClearColorImage(Commands(), texture->GetVkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1, &range);
+        }
+        Transition(texture, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                   VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    }
+
+    void CheckBindlessArrayViews(RHITextureType type)
+    {
+        const bool                cube = type == RHITextureType::eCube;
+        const RHIBindlessHeapType arrayHeap =
+            cube ? RHIBindlessHeapType::eTextureCubeArray : RHIBindlessHeapType::eTexture2DArray;
+        const RHIBindlessHeapType sliceHeap = cube ? RHIBindlessHeapType::eTextureCube : RHIBindlessHeapType::eTexture2D;
+        VulkanTexture*            texture   = ArrayTexture(type);
+        ASSERT_NE(texture, nullptr);
+        RHITextureView* explicitArray = ArraySlice(texture, type, true);
+        RHITextureView* slice         = ArraySlice(texture, type, false);
+        ASSERT_NE(explicitArray, nullptr);
+        ASSERT_NE(slice, nullptr);
+
+        // Both texture registration and its default view select the array heap.
+        RHIResource* resources[] = {texture, texture->GetDefaultView()};
+        for (RHIResource* resource : resources)
+        {
+            const RHIBindlessHandle handle = session->rhi.RegisterBindlessResource(resource);
+            ASSERT_TRUE(handle.IsValid());
+            EXPECT_EQ(handle.heapType, arrayHeap);
+            EXPECT_EQ(handle.slotIndex, 0u);
+            session->rhi.GetBindlessDescriptorPoolManager()->Flush();
+            EXPECT_TRUE(session->rhi.UnregisterBindlessResource(handle));
+            EXPECT_EQ(texture->GetRefCount(), 1u);
+            EXPECT_EQ(resource->GetRefCount(), 1u);
+        }
+
+        RHIPipeline* pipeline = Compute(cube ? "binding_bindless_cube_array.comp.spv" : "binding_bindless_array.comp.spv");
+        ASSERT_NE(pipeline, nullptr);
+        RHISampler*   sampler = Sampler();
+        VulkanBuffer* output  = Buffer();
+        ASSERT_NE(sampler, nullptr);
+        ASSERT_NE(output, nullptr);
+        InitializeArray(texture, type);
+        const RHIBindlessHandle handles[] = {session->rhi.RegisterBindlessResource(texture->GetDefaultView(), 0),
+                                             session->rhi.RegisterBindlessResource(explicitArray, 1),
+                                             session->rhi.RegisterBindlessResource(slice, 0),
+                                             session->rhi.RegisterBindlessResource(sampler, 0)};
+        for (RHIBindlessHandle handle : handles)
+        {
+            ASSERT_TRUE(handle.IsValid());
+        }
+        RHIBatchedShaderParameters parameters;
+        parameters.AddResourceParam(*pipeline->GetShader()->GetSRDByLocation(0, ToUnderlying(sliceHeap)), slice, nullptr, 0);
+        parameters.AddResourceParam(*pipeline->GetShader()->GetSRDByLocation(0, ToUnderlying(arrayHeap)),
+                                    texture->GetDefaultView(), nullptr, 0);
+        parameters.AddResourceParam(*pipeline->GetShader()->GetSRDByLocation(0, ToUnderlying(arrayHeap)), explicitArray,
+                                    nullptr, 1);
+        parameters.AddResourceParam(*pipeline->GetShader()->GetSRDByLocation(0, 2), sampler, nullptr, 0);
+        parameters.AddResourceParam(*pipeline->GetShader()->GetSRDByLocation(2, 0), output, nullptr, 0);
+        context->RHISetShaderParameters(parameters);
+        ASSERT_FALSE(context->GetRecordingError().IsFailure());
+
+        EXPECT_EQ(handles[0].heapType, arrayHeap);
+        EXPECT_EQ(handles[1].heapType, arrayHeap);
+        EXPECT_EQ(handles[2].heapType, sliceHeap);
+        EXPECT_EQ(handles[3].heapType, RHIBindlessHeapType::eSampler);
+        EXPECT_EQ(handles[0].slotIndex, 0u);
+        EXPECT_EQ(handles[2].slotIndex, 0u);
+        EXPECT_EQ(handles[3].slotIndex, 0u);
+        PushIndex(pipeline, 0);
+        context->RHIDispatch(1, 1, 1);
+        ASSERT_FALSE(context->GetRecordingError().IsFailure());
+
+        for (RHIBindlessHandle handle : handles)
+        {
+            ASSERT_TRUE(session->rhi.UnregisterBindlessResource(handle));
+        }
+        EXPECT_FALSE(session->rhi.RegisterBindlessResource(texture->GetDefaultView(), 0).IsValid());
+        EXPECT_FALSE(session->rhi.RegisterBindlessResource(slice, 0).IsValid());
+        session->rhi.DestroyTexture(texture);
+        textures.back() = nullptr;
+        session->rhi.DestroySampler(sampler);
+        samplers.back() = nullptr;
+
+        // Retired array views and their owner survive until the recorded GPU read completes.
+        SubmitAndWait();
+        const uint32_t* colors = reinterpret_cast<const uint32_t*>(output->Map());
+        ASSERT_NE(colors, nullptr);
+        EXPECT_EQ(colors[0], 0xFF0000FFu);
+        EXPECT_EQ(colors[1], 0xFF00FF00u);
+        EXPECT_EQ(colors[2], 0xFF00FF00u);
+        EXPECT_EQ(colors[3], 0xFF00FF00u);
+        output->Unmap();
+        session->rhi.CollectRetiredBindlessResources();
+
+        VulkanTexture* replacement = ArrayTexture(type);
+        ASSERT_NE(replacement, nullptr);
+        RHITextureView* replacementSlice = ArraySlice(replacement, type, false);
+        ASSERT_NE(replacementSlice, nullptr);
+        const RHIBindlessHandle nextArray   = session->rhi.RegisterBindlessResource(replacement->GetDefaultView(), 0);
+        const RHIBindlessHandle nextSlice   = session->rhi.RegisterBindlessResource(replacementSlice, 0);
+        const RHIBindlessHandle nextSampler = session->rhi.RegisterBindlessResource(Sampler(), 0);
+        EXPECT_TRUE(nextArray.IsValid());
+        EXPECT_TRUE(nextSlice.IsValid());
+        EXPECT_TRUE(nextSampler.IsValid());
+        EXPECT_NE(nextArray.generation, handles[0].generation);
+        EXPECT_FALSE(session->rhi.UnregisterBindlessResource(handles[0]));
+    }
+
+    void CheckArrayTransactions(RHITextureType type)
+    {
+        VulkanTexture* texture = ArrayTexture(type);
+        ASSERT_NE(texture, nullptr);
+        RHITextureView* array = texture->GetDefaultView();
+        RHITextureView* slice = ArraySlice(texture, type, false);
+        ASSERT_NE(slice, nullptr);
+        RHISampler* sampler = Sampler();
+        ASSERT_NE(sampler, nullptr);
+        VulkanBindlessDescriptorPoolManager* manager     = session->rhi.GetBindlessDescriptorPoolManager();
+        const uint64_t                       transaction = manager->BeginTransaction();
+        RHIBindlessHandle                    arrayHandle;
+        RHIBindlessHandle                    sliceHandle;
+        RHIBindlessHandle                    samplerHandle;
+        ASSERT_TRUE(manager->RegisterBindlessResource(array, 0, &arrayHandle, 0, transaction));
+        ASSERT_TRUE(manager->RegisterBindlessResource(slice, 0, &sliceHandle, 0, transaction));
+        ASSERT_TRUE(manager->RegisterBindlessResource(sampler, 0, &samplerHandle, 0, transaction));
+        EXPECT_FALSE(session->rhi.IsBindlessResourceRegistered(arrayHandle));
+        EXPECT_FALSE(session->rhi.RegisterBindlessResource(array, 0).IsValid());
+        EXPECT_EQ(texture->GetRefCount(), 3u);
+        manager->ResolveTransaction(transaction, false);
+        EXPECT_EQ(texture->GetRefCount(), 1u);
+        EXPECT_EQ(array->GetRefCount(), 1u);
+        EXPECT_EQ(slice->GetRefCount(), 1u);
+        EXPECT_EQ(sampler->GetRefCount(), 1u);
+        descriptorWriteCount = 0;
+        {
+            test::ScopedVulkanCall<PFN_vkUpdateDescriptorSets> observe(vkUpdateDescriptorSets, CountDescriptorWrites);
+            manager->Flush();
+            EXPECT_EQ(descriptorWriteCount, 0u);
+        }
+
+        const uint64_t    committed = manager->BeginTransaction();
+        RHIBindlessHandle committedArray;
+        RHIBindlessHandle committedSlice;
+        ASSERT_TRUE(manager->RegisterBindlessResource(array, 0, &committedArray, 0, committed));
+        ASSERT_TRUE(manager->RegisterBindlessResource(slice, 0, &committedSlice, 0, committed));
+        manager->ResolveTransaction(committed, true);
+        EXPECT_TRUE(session->rhi.IsBindlessResourceRegistered(committedArray));
+        EXPECT_TRUE(session->rhi.IsBindlessResourceRegistered(committedSlice));
+        EXPECT_NE(committedArray.generation, arrayHandle.generation);
+        EXPECT_FALSE(session->rhi.UnregisterBindlessResource(arrayHandle));
+        manager->Flush();
+        EXPECT_TRUE(session->rhi.UnregisterBindlessResource(committedArray));
+        EXPECT_TRUE(session->rhi.UnregisterBindlessResource(committedSlice));
+        EXPECT_EQ(texture->GetRefCount(), 1u);
+    }
 };
 
 #include "VulkanBindlessSceneResetTests.inl"
+
+TEST_F(VulkanBindlessRetirementIntegrationTest, ArrayViewsRouteReadLayersAndRetainOwnersUntilGPUCompletion)
+{
+    CheckBindlessArrayViews(RHITextureType::e2D);
+}
+
+TEST_F(VulkanBindlessRetirementIntegrationTest, CubeArrayViewsRouteReadCubesAndRetainOwnersUntilGPUCompletion)
+{
+    if (session->rhi.GetDevice()->GetPhysicalDeviceFeatures().imageCubeArray)
+    {
+        CheckBindlessArrayViews(RHITextureType::eCube);
+    }
+    else
+    {
+        GTEST_SKIP() << "Cube array views unsupported";
+    }
+}
+
+TEST_F(VulkanBindlessRetirementIntegrationTest, ArrayHeapTransactionRollbackAndCommitKeepSliceSlotsIndependent)
+{
+    CheckArrayTransactions(RHITextureType::e2D);
+}
+
+TEST_F(VulkanBindlessRetirementIntegrationTest, MatchingArrayParametersPublishSeparateHeapSlotsOnSubmission)
+{
+    VulkanTexture* texture = ArrayTexture(RHITextureType::e2D);
+    ASSERT_NE(texture, nullptr);
+    RHITextureView* slice = ArraySlice(texture, RHITextureType::e2D, false);
+    ASSERT_NE(slice, nullptr);
+    RHISampler* sampler = Sampler();
+    ASSERT_NE(sampler, nullptr);
+    RHIPipeline* pipeline = Compute("binding_bindless_array.comp.spv");
+    ASSERT_NE(pipeline, nullptr);
+    const RHIBindlessHeapType  heaps[]     = {RHIBindlessHeapType::eTexture2D, RHIBindlessHeapType::eTexture2DArray,
+                                              RHIBindlessHeapType::eSampler};
+    RHIResource*               resources[] = {slice, texture->GetDefaultView(), sampler};
+    RHIBatchedShaderParameters parameters;
+    for (size_t index = 0; index < std::size(resources); ++index)
+    {
+        parameters.AddResourceParam(*pipeline->GetShader()->GetSRDByLocation(0, ToUnderlying(heaps[index])), resources[index],
+                                    nullptr, 0);
+    }
+    context->RHISetShaderParameters(parameters);
+    ASSERT_FALSE(context->GetRecordingError().IsFailure());
+    for (RHIResource* resource : resources)
+    {
+        EXPECT_FALSE(session->rhi.RegisterBindlessResource(resource, 0).IsValid());
+    }
+    // The immediate submission path publishes the context's descriptor transaction.
+    context->GetCommandBuffer();
+    ASSERT_EQ(context->SubmitRecordedWorkloads(), RHISubmissionResult::eSuccess);
+    ASSERT_TRUE(context->GetQueue()->WaitForCompletion(context->GetLastSubmittedSerial(), UINT64_MAX));
+    for (size_t index = 0; index < std::size(resources); ++index)
+    {
+        const RHIBindlessHandle handle = session->rhi.RegisterBindlessResource(resources[index], 0);
+        ASSERT_TRUE(handle.IsValid());
+        EXPECT_EQ(handle.heapType, heaps[index]);
+        EXPECT_EQ(handle.slotIndex, 0u);
+        EXPECT_TRUE(session->rhi.UnregisterBindlessResource(handle));
+    }
+    EXPECT_EQ(texture->GetRefCount(), 1u);
+    EXPECT_EQ(sampler->GetRefCount(), 1u);
+}
+
+TEST_F(VulkanBindlessRetirementIntegrationTest, CubeArrayHeapTransactionRollbackAndCommitKeepSliceSlotsIndependent)
+{
+    if (session->rhi.GetDevice()->GetPhysicalDeviceFeatures().imageCubeArray)
+    {
+        CheckArrayTransactions(RHITextureType::eCube);
+    }
+    else
+    {
+        GTEST_SKIP() << "Cube array views unsupported";
+    }
+}
+
+TEST_F(VulkanBindlessRetirementIntegrationTest, ArrayViewAtTexture2DBindingRejectsWholeBindlessBatch)
+{
+    VulkanTexture* texture = Texture();
+    ASSERT_NE(texture, nullptr);
+    RHITextureViewCreateInfo viewInfo{};
+    viewInfo.type         = RHITextureType::e2D;
+    viewInfo.format       = texture->GetFormat();
+    viewInfo.arrayView    = true;
+    RHITextureView* array = texture->CreateView(viewInfo);
+    ASSERT_NE(array, nullptr);
+    RHIPipeline* pipeline = Compute("binding_bindless.comp.spv");
+    ASSERT_NE(pipeline, nullptr);
+    const RHIShaderResourceDescriptor* descriptor = pipeline->GetShader()->GetSRDByLocation(0, 0);
+    ASSERT_NE(descriptor, nullptr);
+    RHIBatchedShaderParameters parameters;
+    parameters.AddResourceParam(*descriptor, texture, nullptr, 0);
+    parameters.AddResourceParam(*descriptor, array, nullptr, 1);
+
+    VulkanBindlessDescriptorPoolManager* manager = session->rhi.GetBindlessDescriptorPoolManager();
+    descriptorWriteCount                         = 0;
+    {
+        test::ScopedVulkanCall<PFN_vkUpdateDescriptorSets> observe(vkUpdateDescriptorSets, CountDescriptorWrites);
+        context->RHISetShaderParameters(parameters);
+        EXPECT_EQ(context->GetRecordingError().code, RHIErrorCode::eInvalidArgument);
+        EXPECT_EQ(texture->GetRefCount(), 1u);
+        EXPECT_EQ(array->GetRefCount(), 1u);
+        manager->Flush();
+        EXPECT_EQ(descriptorWriteCount, 0u);
+    }
+    context->RHIDiscardRecording();
+    const RHIBindlessHandle handle = session->rhi.RegisterBindlessResource(texture, 0);
+    ASSERT_TRUE(handle.IsValid());
+    manager->Flush();
+    EXPECT_TRUE(session->rhi.UnregisterBindlessResource(handle));
+}
+
+TEST_F(VulkanBindlessRetirementIntegrationTest, MultisampledViewsCannotEnterSingleSampleBindlessHeaps)
+{
+    VkImageFormatProperties properties{};
+    const VkResult          supported = vkGetPhysicalDeviceImageFormatProperties(
+        session->rhi.GetDevice()->GetPhysicalDeviceHandle(), VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D,
+        VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &properties);
+    if (supported == VK_SUCCESS && (properties.sampleCounts & (VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT)) != 0)
+    {
+        RHITextureCreateInfo info{};
+        info.type   = RHITextureType::e2D;
+        info.format = DataFormat::eR8G8B8A8UNORM;
+        info.width = info.height = 4;
+        info.samples             = (properties.sampleCounts & VK_SAMPLE_COUNT_2_BIT) != 0 ? SampleCount::e2 : SampleCount::e4;
+        info.usageFlags.SetFlag(RHITextureUsageFlagBits::eSampled);
+        RHITexture* texture = session->rhi.CreateTexture(info);
+        textures.push_back(texture);
+        ASSERT_NE(texture, nullptr);
+        RHITextureViewCreateInfo viewInfo{};
+        viewInfo.type         = RHITextureType::e2D;
+        viewInfo.format       = info.format;
+        viewInfo.arrayView    = true;
+        RHITextureView* array = texture->CreateView(viewInfo);
+        ASSERT_NE(array, nullptr);
+        VulkanBindlessDescriptorPoolManager* manager     = session->rhi.GetBindlessDescriptorPoolManager();
+        RHIResource*                         resources[] = {texture, texture->GetDefaultView(), array};
+        descriptorWriteCount                             = 0;
+        {
+            test::ScopedVulkanCall<PFN_vkUpdateDescriptorSets> observe(vkUpdateDescriptorSets, CountDescriptorWrites);
+            for (RHIResource* resource : resources)
+            {
+                const RHIBindlessHeapType heap =
+                    resource == array ? RHIBindlessHeapType::eTexture2DArray : RHIBindlessHeapType::eTexture2D;
+                const RHIShaderResourceParameter parameter{
+                    0, ToUnderlying(heap), 0, resource, nullptr, RHIShaderResourceType::eTexture};
+                EXPECT_FALSE(manager->CanRegisterBindlessResources(MakeVecView(&parameter, size_t(1)), 0, 0));
+                EXPECT_FALSE(session->rhi.RegisterBindlessResource(resource).IsValid());
+                EXPECT_FALSE(session->rhi.RegisterBindlessResource(resource, 0).IsValid());
+                EXPECT_EQ(resource->GetRefCount(), 1u);
+                EXPECT_EQ(texture->GetRefCount(), 1u);
+            }
+            manager->Flush();
+            EXPECT_EQ(descriptorWriteCount, 0u);
+        }
+    }
+    else
+    {
+        GTEST_SKIP() << "Multisampled sampled RGBA8 images unsupported";
+    }
+}
 
 TEST_F(VulkanBindlessRetirementIntegrationTest, HandlesRejectStaleRetirementAfterSlotReuse)
 {

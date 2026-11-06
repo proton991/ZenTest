@@ -761,17 +761,58 @@ TEST(VulkanProductionFailureTest, FailedUniformOrDescriptorPreparationSuppresses
     session.rhi.DestroyShader(shader);
 }
 
-TEST(VulkanProductionFailureDeathTest, DeviceSelectionReportsAnUnsupportedProfile)
+struct ImpossibleBindlessProfile
+{
+    static inline PFN_vkGetPhysicalDeviceProperties2 original;
+
+    static VKAPI_ATTR void VKAPI_CALL Properties(VkPhysicalDevice gpu, VkPhysicalDeviceProperties2* output)
+    {
+        original(gpu, output);
+        for (VkBaseOutStructure* node = static_cast<VkBaseOutStructure*>(output->pNext); node != nullptr; node = node->pNext)
+        {
+            if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES)
+            {
+                reinterpret_cast<VkPhysicalDeviceDescriptorIndexingProperties*>(node)->maxPerStageUpdateAfterBindResources = 3;
+            }
+        }
+    }
+};
+
+struct UnsupportedBindlessLayout
+{
+    static VKAPI_ATTR void VKAPI_CALL Query(VkDevice,
+                                            const VkDescriptorSetLayoutCreateInfo*,
+                                            VkDescriptorSetLayoutSupport* support)
+    {
+        support->supported = VK_FALSE;
+    }
+};
+
+TEST(VulkanProductionFailureDeathTest, UnsupportedGlobalHeapLayoutStopsStartup)
 {
     EXPECT_DEATH(
         {
-            RHIOptions::GetInstance().SetBindlessHeapCapacities({UINT32_MAX, UINT32_MAX, UINT32_MAX});
-
-            VulkanRHI rhi;
-
-            rhi.Init();
+            test::VulkanSession                                         session;
+            test::ScopedVulkanCall<PFN_vkGetDescriptorSetLayoutSupport> query(vkGetDescriptorSetLayoutSupport,
+                                                                              UnsupportedBindlessLayout::Query);
+            VulkanBindlessDescriptorPoolManager                         manager;
+            manager.Init();
         },
-        "No Vulkan device satisfies");
+        "does not support the global bindless layout");
+}
+
+TEST(VulkanProductionFailureDeathTest, DeviceInitializationReportsImpossibleBindlessMinimum)
+{
+    EXPECT_DEATH(
+        {
+            test::VulkanSession session;
+            ImpossibleBindlessProfile::original = vkGetPhysicalDeviceProperties2;
+            test::ScopedVulkanCall<PFN_vkGetPhysicalDeviceProperties2> properties(vkGetPhysicalDeviceProperties2,
+                                                                                  ImpossibleBindlessProfile::Properties);
+            VulkanDevice                                               device(session.rhi.GetPhysicalDevice());
+            device.Init();
+        },
+        "at least one slot per heap");
 }
 
 TEST(VulkanProductionFailureTest, InvalidShaderDoesNotPublishAndSpecializationUsesOwnedBytecode)

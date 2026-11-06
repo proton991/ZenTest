@@ -1,0 +1,26 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define ZEN_BINDLESS_CUBE_ARRAY
+#include "Common/bindless_heap.glsl"
+
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 1) uniform textureCube cubes[];
+layout(set = 2, binding = 0, std430) buffer Result
+{
+    uint colors[4];
+}
+result;
+layout(push_constant) uniform Constants
+{
+    uint index;
+}
+constants;
+
+void main()
+{
+    result.colors[0] = packUnorm4x8(SamplerHeapCubeArray(constants.index, constants.index, vec4(1, 0, 0, 0)));
+    result.colors[1] = packUnorm4x8(SamplerHeapCubeArray(constants.index, constants.index, vec4(1, 0, 0, 1)));
+    result.colors[2] = packUnorm4x8(SamplerHeapCubeArray(constants.index + 1, constants.index, vec4(1, 0, 0, 0)));
+    result.colors[3] = packUnorm4x8(texture(
+        samplerCube(cubes[nonuniformEXT(constants.index)], uSamplerHeap[nonuniformEXT(constants.index)]), vec3(1, 0, 0)));
+}

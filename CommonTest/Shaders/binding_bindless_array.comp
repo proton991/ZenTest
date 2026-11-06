@@ -1,0 +1,24 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define ZEN_BINDLESS_2D_ARRAY
+#include "Common/bindless_heap.glsl"
+
+layout(local_size_x = 1) in;
+layout(set = 2, binding = 0, std430) buffer Result
+{
+    uint colors[4];
+}
+result;
+layout(push_constant) uniform Constants
+{
+    uint index;
+}
+constants;
+
+void main()
+{
+    result.colors[0] = packUnorm4x8(SamplerHeap2DArray(constants.index, constants.index, vec3(0.5, 0.5, 0)));
+    result.colors[1] = packUnorm4x8(SamplerHeap2DArray(constants.index, constants.index, vec3(0.5, 0.5, 1)));
+    result.colors[2] = packUnorm4x8(SamplerHeap2DArray(constants.index + 1, constants.index, vec3(0.5, 0.5, 0)));
+    result.colors[3] = packUnorm4x8(SamplerHeap2D(constants.index, constants.index, vec2(0.5)));
+}

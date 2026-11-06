@@ -201,6 +201,90 @@ struct ScopedDescriptorRangeLimits
     const uint32_t          storage;
 };
 
+struct ScopedBindlessCapacityLimits
+{
+    ScopedBindlessCapacityLimits(VulkanDevice* device, const RHIBindlessHeapCapacities& requested) :
+        limits(const_cast<VkPhysicalDeviceDescriptorIndexingProperties&>(device->GetDescriptorIndexingProperties())),
+        previousLimits(limits),
+        previousRequest(RHIOptions::GetInstance().BindlessHeapCapacities())
+    {
+        limits.maxDescriptorSetUpdateAfterBindSampledImages      = 16 + kBindlessOrdinaryDescriptorReserve;
+        limits.maxPerStageDescriptorUpdateAfterBindSampledImages = 16 + kBindlessOrdinaryDescriptorReserve;
+        limits.maxPerStageUpdateAfterBindResources               = 16 + kBindlessOrdinaryDescriptorReserve;
+        limits.maxDescriptorSetUpdateAfterBindSamplers           = 8 + kBindlessOrdinaryDescriptorReserve;
+        limits.maxPerStageDescriptorUpdateAfterBindSamplers      = 8 + kBindlessOrdinaryDescriptorReserve;
+        limits.maxUpdateAfterBindDescriptorsInAllPools           = 11;
+        EXPECT_TRUE(RHIOptions::GetInstance().SetBindlessHeapCapacities(requested));
+    }
+
+    ~ScopedBindlessCapacityLimits()
+    {
+        limits = previousLimits;
+        EXPECT_TRUE(RHIOptions::GetInstance().SetBindlessHeapCapacities(previousRequest));
+    }
+
+    VkPhysicalDeviceDescriptorIndexingProperties&      limits;
+    const VkPhysicalDeviceDescriptorIndexingProperties previousLimits;
+    const RHIBindlessHeapCapacities                    previousRequest;
+};
+
+struct BindlessCapacityObserver
+{
+    static inline PFN_vkCreateDescriptorSetLayout layout;
+    static inline PFN_vkCreateDescriptorPool      pool;
+    static inline RHIBindlessHeapCapacities       layoutCounts;
+    static inline uint32_t                        layoutCalls;
+    static inline uint32_t                        poolCalls;
+    static inline uint64_t                        poolImages;
+    static inline uint64_t                        poolSamplers;
+
+    static VKAPI_ATTR VkResult VKAPI_CALL Layout(VkDevice                               device,
+                                                 const VkDescriptorSetLayoutCreateInfo* info,
+                                                 const VkAllocationCallbacks*           allocator,
+                                                 VkDescriptorSetLayout*                 output)
+    {
+        ++layoutCalls;
+        EXPECT_EQ(info->bindingCount, ToUnderlying(RHIBindlessHeapType::eMax));
+        EXPECT_NE(info->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT, 0u);
+        for (uint32_t index = 0; index < info->bindingCount; ++index)
+        {
+            const VkDescriptorSetLayoutBinding& binding = info->pBindings[index];
+            EXPECT_LT(binding.binding, layoutCounts.slots.size());
+            if (binding.binding < layoutCounts.slots.size())
+            {
+                layoutCounts.slots[binding.binding] = binding.descriptorCount;
+                EXPECT_EQ(binding.descriptorType, binding.binding == ToUnderlying(RHIBindlessHeapType::eSampler)
+                                                      ? VK_DESCRIPTOR_TYPE_SAMPLER
+                                                      : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+            }
+        }
+        return layout(device, info, allocator, output);
+    }
+
+    static VKAPI_ATTR VkResult VKAPI_CALL Pool(VkDevice                          device,
+                                               const VkDescriptorPoolCreateInfo* info,
+                                               const VkAllocationCallbacks*      allocator,
+                                               VkDescriptorPool*                 output)
+    {
+        ++poolCalls;
+        EXPECT_EQ(info->maxSets, 1u);
+        EXPECT_NE(info->flags & VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT, 0u);
+        for (uint32_t index = 0; index < info->poolSizeCount; ++index)
+        {
+            const VkDescriptorPoolSize& size = info->pPoolSizes[index];
+            if (size.type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)
+            {
+                poolImages += size.descriptorCount;
+            }
+            else if (size.type == VK_DESCRIPTOR_TYPE_SAMPLER)
+            {
+                poolSamplers += size.descriptorCount;
+            }
+        }
+        return pool(device, info, allocator, output);
+    }
+};
+
 class VulkanBindingIntegrationTest : public testing::Test
 {
 protected:
@@ -1658,27 +1742,72 @@ TEST_F(VulkanBindingIntegrationTest, BindlessHeapExhaustionFailsWithoutReplacing
     manager->Flush();
 }
 
-TEST_F(VulkanBindingIntegrationTest, DeviceSelectionRejectsBindlessHeapsBeyondDescriptorLimits)
+TEST_F(VulkanBindingIntegrationTest, OversizedHeapRequestsRemainSelectableWithoutChangingLiveCapacities)
 {
-    const RHIBindlessHeapCapacities created = session->rhi.QueryGPUInfo().bindlessHeapCapacities;
+    const RHIBindlessHeapCapacities created  = session->rhi.QueryGPUInfo().bindlessHeapCapacities;
+    const RHIBindlessHeapCapacities previous = RHIOptions::GetInstance().BindlessHeapCapacities();
 
-    RHIBindlessHeapCapacities oversized     = created;
+    RHIBindlessHeapCapacities oversized      = created;
 
-    // The 64-bit sum with the cube heap must not wrap into a small, accepted count.
-    oversized.Set(RHIBindlessHeapType::eTexture2D, UINT32_MAX);
+    oversized.slots.fill(UINT32_MAX);
 
     ASSERT_TRUE(RHIOptions::GetInstance().SetBindlessHeapCapacities(oversized));
 
     const std::string rejected = VulkanDevice::GetUnsupportedReason(session->rhi.GetPhysicalDevice());
+    EXPECT_EQ(RHIOptions::GetInstance().BindlessHeapCapacities().slots, oversized.slots);
+    EXPECT_EQ(session->rhi.QueryGPUInfo().bindlessHeapCapacities.slots, created.slots);
+    EXPECT_EQ(session->rhi.GetBindlessDescriptorPoolManager()->GetCapacities().slots, created.slots);
 
-    ASSERT_TRUE(RHIOptions::GetInstance().SetBindlessHeapCapacities(created));
+    ASSERT_TRUE(RHIOptions::GetInstance().SetBindlessHeapCapacities(previous));
 
-    EXPECT_NE(rejected.find("bindless heaps"), std::string::npos) << rejected;
+    EXPECT_TRUE(rejected.empty()) << rejected;
 
     EXPECT_TRUE(VulkanDevice::GetUnsupportedReason(session->rhi.GetPhysicalDevice()).empty());
 
     // A live backend keeps the heaps it created.
     EXPECT_EQ(session->rhi.QueryGPUInfo().bindlessHeapCapacities.slots, created.slots);
+}
+
+TEST_F(VulkanBindingIntegrationTest, ReducedReportedLimitsMatchPublishedAndNativeHeapCapacities)
+{
+    const RHIBindlessHeapCapacities live            = session->rhi.QueryGPUInfo().bindlessHeapCapacities;
+    const uint64_t                  liveDescriptors = live.GetImageSlots() + live.Get(RHIBindlessHeapType::eSampler);
+    if (liveDescriptors + 11
+        > session->rhi.GetDevice()->GetDescriptorIndexingProperties().maxUpdateAfterBindDescriptorsInAllPools)
+    {
+        GTEST_SKIP() << "Insufficient real update-after-bind pool headroom for the additional test manager";
+    }
+    const RHIBindlessHeapCapacities requested{{17, 9, 20, 5, 1}};
+    // Only the engine's cached report is reduced; native creation still uses the real driver and validation.
+    ScopedBindlessCapacityLimits reduced(session->rhi.GetDevice(), requested);
+    BindlessCapacityObserver::layout = vkCreateDescriptorSetLayout;
+    BindlessCapacityObserver::pool   = vkCreateDescriptorPool;
+    BindlessCapacityObserver::layoutCounts.slots.fill(0);
+    BindlessCapacityObserver::layoutCalls = BindlessCapacityObserver::poolCalls = 0;
+    BindlessCapacityObserver::poolImages = BindlessCapacityObserver::poolSamplers = 0;
+    test::ScopedVulkanCall<PFN_vkCreateDescriptorSetLayout> layout(vkCreateDescriptorSetLayout,
+                                                                   BindlessCapacityObserver::Layout);
+    test::ScopedVulkanCall<PFN_vkCreateDescriptorPool>      pool(vkCreateDescriptorPool, BindlessCapacityObserver::Pool);
+    VulkanBindlessDescriptorPoolManager                     manager;
+    manager.Init();
+    const RHIBindlessHeapCapacities fitted = manager.GetCapacities();
+    EXPECT_NE(manager.GetGlobalBindlessSet(), VK_NULL_HANDLE);
+    EXPECT_EQ(BindlessCapacityObserver::layoutCalls, 1u);
+    EXPECT_EQ(BindlessCapacityObserver::poolCalls, 1u);
+    EXPECT_EQ(fitted.slots, BindlessCapacityObserver::layoutCounts.slots);
+    EXPECT_EQ(BindlessCapacityObserver::poolImages, fitted.GetImageSlots());
+    EXPECT_EQ(BindlessCapacityObserver::poolSamplers, fitted.Get(RHIBindlessHeapType::eSampler));
+    EXPECT_EQ(BindlessCapacityObserver::poolImages + BindlessCapacityObserver::poolSamplers, 11u);
+    EXPECT_LE(fitted.GetImageSlots(), 16u);
+    EXPECT_LE(fitted.Get(RHIBindlessHeapType::eSampler), 8u);
+    for (size_t index = 0; index < fitted.slots.size(); ++index)
+    {
+        EXPECT_GE(fitted.slots[index], 1u);
+        EXPECT_LE(fitted.slots[index], requested.slots[index]);
+    }
+    EXPECT_EQ(RHIOptions::GetInstance().BindlessHeapCapacities().slots, requested.slots);
+    EXPECT_EQ(session->rhi.QueryGPUInfo().bindlessHeapCapacities.slots, live.slots);
+    manager.Destroy();
 }
 
 // Creates the backend with 2D texture and sampler heaps larger than the defaults.
@@ -1715,17 +1844,22 @@ protected:
 TEST_F(VulkanBindlessCapacityIntegrationTest, ConfiguredHeapsSampleSlotsBeyondTheDefaultCapacity)
 {
     VulkanBindlessDescriptorPoolManager* manager = session->rhi.GetBindlessDescriptorPoolManager();
-
-    const uint32_t slot                          = kSlots - 1;
+    const RHIBindlessHeapCapacities      created = session->rhi.QueryGPUInfo().bindlessHeapCapacities;
+    const uint32_t                       sharedCapacity =
+        std::min(created.Get(RHIBindlessHeapType::eTexture2D), created.Get(RHIBindlessHeapType::eSampler));
 
     ASSERT_NE(manager->GetGlobalBindlessSet(), VK_NULL_HANDLE);
+    if (sharedCapacity <= RHIBindlessHeapCapacities{}.Get(RHIBindlessHeapType::eTexture2D))
+    {
+        GTEST_SKIP() << "Fitted image and sampler heaps cannot address a slot beyond the default image capacity";
+    }
+    const uint32_t slot = sharedCapacity - 1;
 
     ASSERT_GE(slot, RHIBindlessHeapCapacities{}.Get(RHIBindlessHeapType::eTexture2D));
 
-    EXPECT_EQ(session->rhi.QueryGPUInfo().bindlessHeapCapacities.slots,
-              RHIOptions::GetInstance().BindlessHeapCapacities().slots);
-
-    EXPECT_EQ(manager->GetCapacity(RHIBindlessHeapType::eTexture2D), kSlots);
+    EXPECT_EQ(manager->GetCapacities().slots, created.slots);
+    EXPECT_LE(created.Get(RHIBindlessHeapType::eTexture2D), kSlots);
+    EXPECT_LE(created.Get(RHIBindlessHeapType::eSampler), kSlots);
 
     RHIPipeline* pipeline  = Compute("binding_bindless.comp.spv");
 
@@ -1759,7 +1893,58 @@ TEST_F(VulkanBindlessCapacityIntegrationTest, ConfiguredHeapsSampleSlotsBeyondTh
 
     output->Unmap();
 
-    EXPECT_FALSE(manager->RegisterBindlessResource(sampler, kSlots));
+    EXPECT_FALSE(manager->RegisterBindlessResource(sampler, created.Get(RHIBindlessHeapType::eSampler)));
+}
+
+// Requests more slots than any device allows, so the backend fits the heaps to its limits.
+class VulkanFittedBindlessIntegrationTest : public VulkanBindingIntegrationTest
+{
+protected:
+    void SetUp() override
+    {
+        m_previous = RHIOptions::GetInstance().BindlessHeapCapacities();
+        RHIBindlessHeapCapacities capacities;
+        capacities.slots.fill(UINT32_MAX);
+        ASSERT_TRUE(RHIOptions::GetInstance().SetBindlessHeapCapacities(capacities));
+        VulkanBindingIntegrationTest::SetUp();
+    }
+
+    void TearDown() override
+    {
+        VulkanBindingIntegrationTest::TearDown();
+        RHIOptions::GetInstance().SetBindlessHeapCapacities(m_previous);
+    }
+
+    RHIBindlessHeapCapacities m_previous;
+};
+
+TEST_F(VulkanFittedBindlessIntegrationTest, FittedHeapsLeaveRoomForOrdinaryDescriptorsAndColorTargets)
+{
+    EXPECT_NE(session->rhi.GetBindlessDescriptorPoolManager()->GetGlobalBindlessSet(), VK_NULL_HANDLE);
+    EXPECT_TRUE(BindlessHeapsFitLimits(session->rhi.GetDevice()->GetDescriptorIndexingProperties(),
+                                       session->rhi.QueryGPUInfo().bindlessHeapCapacities));
+    // This shader adds ordinary sampled images, samplers and a buffer beside the heaps.
+    VulkanShader* compute = Shader("binding_recording_array.comp.spv");
+    ASSERT_NE(compute, nullptr);
+    RHIPipeline* computePipeline = session->rhi.CreatePipeline(RHIComputePipelineCreateInfo{compute});
+    ASSERT_NE(computePipeline, nullptr);
+    pipelines.push_back(computePipeline);
+    VulkanShader* graphics = Shader("pipeline.frag.spv", true);
+    ASSERT_NE(graphics, nullptr);
+    RHIRenderingLayout layout{};
+    layout.SetRenderArea(0, 0, 4, 4);
+    layout.numColorRenderTargets = MAX_NUM_COLOR_ATTACHMENTS;
+    RHIGfxPipelineCreateInfo info{};
+    info.pShader          = graphics;
+    info.pRenderingLayout = &layout;
+    for (uint32_t index = 0; index < MAX_NUM_COLOR_ATTACHMENTS; ++index)
+    {
+        layout.colorRenderTargets[index].format = DataFormat::eR8G8B8A8UNORM;
+        info.states.colorBlendState.AddAttachment();
+    }
+    RHIPipeline* graphicsPipeline = session->rhi.CreatePipeline(info);
+    ASSERT_NE(graphicsPipeline, nullptr);
+    pipelines.push_back(graphicsPipeline);
 }
 
 TEST_F(VulkanBindingIntegrationTest, RecordedPushConstantOffsetPreservesEarlierFields)
