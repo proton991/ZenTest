@@ -162,6 +162,48 @@ struct SurfaceExecutionMode
     bool             forceFences;
 };
 
+struct RecreationSurfaceLoss
+{
+    static inline PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR capabilities{};
+    static inline PFN_vkCreateSwapchainKHR                      create{};
+    static inline uint32_t                                      failuresRemaining{};
+    static inline bool                                          failCreation{};
+
+    static VKAPI_ATTR VkResult VKAPI_CALL Capabilities(VkPhysicalDevice          device,
+                                                       VkSurfaceKHR              surface,
+                                                       VkSurfaceCapabilitiesKHR* output)
+    {
+        VkResult result = VK_ERROR_SURFACE_LOST_KHR;
+        if (!failCreation && failuresRemaining != 0)
+        {
+            --failuresRemaining;
+        }
+        else
+        {
+            result = capabilities(device, surface, output);
+        }
+        return result;
+    }
+
+    static VKAPI_ATTR VkResult VKAPI_CALL Create(VkDevice                        device,
+                                                 const VkSwapchainCreateInfoKHR* info,
+                                                 const VkAllocationCallbacks*    allocator,
+                                                 VkSwapchainKHR*                 output)
+    {
+        VkResult result = VK_ERROR_SURFACE_LOST_KHR;
+        if (failCreation && failuresRemaining != 0)
+        {
+            --failuresRemaining;
+            *output = VK_NULL_HANDLE;
+        }
+        else
+        {
+            result = create(device, info, allocator, output);
+        }
+        return result;
+    }
+};
+
 class RHIWindowSurfaceIntegrationTest : public testing::TestWithParam<SurfaceExecutionMode>
 {
 protected:
@@ -423,6 +465,54 @@ TEST_P(RHIWindowSurfaceIntegrationTest, SurfaceLossReturnsToWindowThreadBeforeRe
 
     EXPECT_FALSE(GetRHIThread().Invoke(&RHIViewport::NeedsRecreation, viewport));
 
+    EXPECT_FALSE(executor->AreSubmissionsBlocked());
+}
+
+TEST_P(RHIWindowSurfaceIntegrationTest, SurfaceLossDuringRecreationReplacesSurfaceAndRetries)
+{
+    CreateViewport();
+    ASSERT_NE(viewport, nullptr);
+    RecreationSurfaceLoss::capabilities = vkGetPhysicalDeviceSurfaceCapabilitiesKHR;
+    RecreationSurfaceLoss::create       = vkCreateSwapchainKHR;
+    for (bool failCreation : {false, true})
+    {
+        SCOPED_TRACE(failCreation);
+        RecreationSurfaceLoss::failCreation      = failCreation;
+        RecreationSurfaceLoss::failuresRemaining = 1;
+        test::ScopedVulkanCall capabilities(vkGetPhysicalDeviceSurfaceCapabilitiesKHR, &RecreationSurfaceLoss::Capabilities);
+        test::ScopedVulkanCall create(vkCreateSwapchainKHR, &RecreationSurfaceLoss::Create);
+        viewport->Resize(96, 80);
+        EXPECT_EQ(RecreationSurfaceLoss::failuresRemaining, 0u);
+        EXPECT_EQ(oldSwapchain, VK_NULL_HANDLE);
+        EXPECT_EQ(creationThread, rhiThread);
+        ASSERT_NE(viewport->GetColorBackBuffer(), nullptr);
+        EXPECT_FALSE(GetRHIThread().Invoke(&RHIViewport::NeedsRecreation, viewport));
+        EXPECT_FALSE(executor->AreSubmissionsBlocked());
+        RHICommandListPtr    commands = RecordFrame();
+        const RHIBatchResult result   = executor->SubmitFrame(*commands, viewport).Wait();
+        EXPECT_EQ(result.submission, RHISubmissionResult::eSuccess);
+        EXPECT_TRUE(result.presented);
+    }
+}
+
+TEST_P(RHIWindowSurfaceIntegrationTest, RepeatedRecreationSurfaceLossRemainsPending)
+{
+    CreateViewport();
+    ASSERT_NE(viewport, nullptr);
+    RecreationSurfaceLoss::capabilities      = vkGetPhysicalDeviceSurfaceCapabilitiesKHR;
+    RecreationSurfaceLoss::failCreation      = false;
+    RecreationSurfaceLoss::failuresRemaining = 2;
+    {
+        test::ScopedVulkanCall capabilities(vkGetPhysicalDeviceSurfaceCapabilitiesKHR, &RecreationSurfaceLoss::Capabilities);
+        viewport->Resize(96, 80);
+    }
+    EXPECT_EQ(RecreationSurfaceLoss::failuresRemaining, 0u);
+    EXPECT_EQ(viewport->GetColorBackBuffer(), nullptr);
+    EXPECT_TRUE(GetRHIThread().Invoke(&RHIViewport::NeedsRecreation, viewport));
+    EXPECT_FALSE(executor->AreSubmissionsBlocked());
+    viewport->Resize(96, 80);
+    EXPECT_NE(viewport->GetColorBackBuffer(), nullptr);
+    EXPECT_FALSE(GetRHIThread().Invoke(&RHIViewport::NeedsRecreation, viewport));
     EXPECT_FALSE(executor->AreSubmissionsBlocked());
 }
 

@@ -1035,13 +1035,14 @@ TEST_F(VulkanCapabilityIntegrationTest, OptionalFeaturesDisableTheirDependentsAn
 
         ASSERT_NE(buffer, VK_NULL_HANDLE);
 
-        uint32_t* mapped = reinterpret_cast<uint32_t*>(allocator.MapBuffer(allocation));
+        uint32_t* mapped = static_cast<uint32_t*>(allocation.info.pMappedData);
 
-        *mapped          = 42;
+        ASSERT_NE(mapped, nullptr);
+
+        *mapped = 42;
 
         EXPECT_EQ(*mapped, 42u);
 
-        allocator.UnmapBuffer(allocation);
 
         allocator.FreeBuffer(buffer, allocation);
     }

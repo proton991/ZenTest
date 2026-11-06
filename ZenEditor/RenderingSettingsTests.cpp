@@ -342,6 +342,10 @@ TEST(RenderingSettings, PresetsAndShadowPreflight)
 
     EXPECT_EQ(rc::EstimateShadowBytes(2048, 192), 3ull * 1024 * 1024 * 1024 + 192ull * 1024 * 1024);
 
+    EXPECT_EQ(rc::EstimateShadowBytes(128, 1), 128ull * 128 * 4 + 32ull * 32 * 4);
+
+    EXPECT_EQ(rc::EstimateShadowBytes(128, 0), rc::EstimateShadowBytes(128, 1));
+
     EXPECT_FALSE(rc::ValidateShadowMemory(2048, 192, 2ull * 1024 * 1024 * 1024));
 
     EXPECT_TRUE(rc::ValidateShadowMemory(128, 48, 64ull * 1024 * 1024));

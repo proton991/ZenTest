@@ -166,7 +166,8 @@ TEST_F(RenderCoreTest, SceneShadowsCacheStaticFacesAndInvalidateAfterLightOrHand
     RenderGraph*        graph   = device->GetCurrentFrameRDG();
     RDGMetrics&         metrics = device->GetRDGMetrics();
     metrics.SetSink({});
-    const uint32_t expectedFaces[] = {12, 0, 6, 0, 12, 0, 7, 6, 2, 6, 0, 0};
+    // Disabled shadows retain one initialized array layer; explicit array views need no padding.
+    const uint32_t expectedFaces[] = {12, 0, 6, 0, 12, 0, 7, 6, 1, 6, 0, 0};
     for (uint32_t frame = 0; frame < std::size(expectedFaces); ++frame)
     {
         SCOPED_TRACE(frame);

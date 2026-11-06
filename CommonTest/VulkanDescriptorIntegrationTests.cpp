@@ -261,7 +261,7 @@ protected:
 
         uint32_t firstSet = 0;
 
-        state.FlushPendingDescriptorWrites(context, sets, firstSet, offsets);
+        EXPECT_TRUE(state.FlushPendingDescriptorWrites(context, sets, firstSet, offsets));
 
         EXPECT_EQ(firstSet, test::kLocalResourceSet);
 

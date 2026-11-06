@@ -47,6 +47,7 @@ add_executable(VulkanRHIIntegrationTest
     CommonTest/VulkanGPUTimingIntegrationTests.cpp
     CommonTest/VulkanPipelineIntegrationTests.cpp
     CommonTest/VulkanShaderLayoutIntegrationTests.cpp
+    CommonTest/VulkanCommandValidationIntegrationTests.cpp
     CommonTest/VulkanProductionFailureTests.cpp
     CommonTest/VulkanBindingIntegrationTests.cpp
     CommonTest/VulkanSwapchainIntegrationTests.cpp
@@ -66,8 +67,8 @@ set(RDG_REFLECTION_TEST_BINARIES)
 foreach(SHADER review_acceleration.comp review_runtime_array.comp review_reserved_set.comp review_duplicate.vert review_duplicate.frag rdg_access.comp rdg_shared.vert rdg_shared.frag
         descriptor_storage.comp descriptor_array.comp descriptor_bindings.comp
         descriptor_uniform.comp descriptor_uniform_large.comp descriptor_uniform_limit.comp descriptor_sampler_limit.comp
-        pipeline_specialization.comp pipeline.vert pipeline.frag pipeline_depth.frag
-        binding_sampler.comp binding_uniform_array.comp binding_bindless.comp binding_bindless.frag binding_push_constants.comp
+        pipeline_specialization.comp pipeline.vert pipeline.frag pipeline_depth.frag pipeline_dual_source.frag
+        binding_sampler.comp binding_recording_array.comp binding_single_layer_array.comp binding_uniform_array.comp binding_bindless.comp binding_bindless.frag binding_push_constants.comp
         recording_uniform.frag recording_uniform.comp recording_vertex.vert async_resources.comp binding_texel.comp
         binding_high_set.comp binding_required_sets.comp binding_validation.comp
         unsupported_tessellation.tesc unsupported_tessellation.tese)

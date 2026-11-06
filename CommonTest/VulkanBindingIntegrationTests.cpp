@@ -40,11 +40,17 @@ struct BindingObserver
     static inline std::vector<VkDescriptorSet> sets;
     static inline std::vector<uint32_t>        offsets;
     static inline uint32_t                     suppressedDispatches;
+    static inline uint32_t                     suppressedDraws;
 
     // Invalid test inputs must never reach the driver, even before the regression is fixed.
     static VKAPI_ATTR void VKAPI_CALL SuppressDispatch(VkCommandBuffer, uint32_t, uint32_t, uint32_t)
     {
         ++suppressedDispatches;
+    }
+
+    static VKAPI_ATTR void VKAPI_CALL SuppressDraw(VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t)
+    {
+        ++suppressedDraws;
     }
 
     static VKAPI_ATTR void VKAPI_CALL Bind(VkCommandBuffer        commands,
@@ -154,6 +160,25 @@ struct ReviewWriteObserver
     {
         ++calls;
         original(device, count, writes, copyCount, copies);
+    }
+};
+
+struct DescriptorFailureProbe
+{
+    static inline uint32_t                allocationCalls{0};
+    static inline uint32_t                poolCalls{0};
+    static VKAPI_ATTR VkResult VKAPI_CALL Allocate(VkDevice, const VkDescriptorSetAllocateInfo*, VkDescriptorSet*)
+    {
+        ++allocationCalls;
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    static VKAPI_ATTR VkResult VKAPI_CALL CreatePool(VkDevice,
+                                                     const VkDescriptorPoolCreateInfo*,
+                                                     const VkAllocationCallbacks*,
+                                                     VkDescriptorPool*)
+    {
+        ++poolCalls;
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
 };
 
@@ -454,6 +479,17 @@ protected:
         ASSERT_TRUE(queue->WaitForCompletion(serial, UINT64_MAX));
     }
 
+    void SubmitRecordedAndWait()
+    {
+        RHICommandList*                     lists[]{commandList};
+        HeapVector<RHIPlatformCommandList*> platform;
+        ASSERT_TRUE(session->rhi.FinalizeCommandLists({lists, 1}, platform));
+        session->rhi.SubmitPlatformCommandLists(platform);
+        ASSERT_EQ(session->rhi.FlushAllGPUCommands(), RHISubmissionResult::eSuccess);
+        session->rhi.WaitDeviceIdle();
+        commandList->Reset();
+    }
+
     void PushIndex(RHIPipeline* pipeline, uint32_t index)
     {
         context->RHISetPushConstants(pipeline, MakeVecView(reinterpret_cast<const uint8_t*>(&index), sizeof(index)));
@@ -497,7 +533,7 @@ TEST_F(VulkanBindingIntegrationTest, TextureCannotFillSamplerBinding)
 
     uint32_t firstSet = 0;
 
-    state.FlushPendingDescriptorWrites(context, sets, firstSet, offsets);
+    EXPECT_FALSE(state.FlushPendingDescriptorWrites(context, sets, firstSet, offsets));
 
     EXPECT_TRUE(sets.empty());
 }
@@ -552,6 +588,203 @@ TEST_F(VulkanBindingIntegrationTest, MissingRequiredSetsRejectDispatchAndAllowDi
     SubmitAndWait();
     EXPECT_EQ(*reinterpret_cast<const uint32_t*>(output->Map()), 42u);
     output->Unmap();
+}
+
+TEST_F(VulkanBindingIntegrationTest, ReusedRecordedListDropsReleasedArrayElements)
+{
+    RHIPipeline* pipeline = Compute("binding_recording_array.comp.spv");
+    ASSERT_NE(pipeline, nullptr);
+    RHISampler*   sampler = Sampler();
+    VulkanBuffer* output  = Buffer();
+    ASSERT_NE(sampler, nullptr);
+    ASSERT_NE(output, nullptr);
+    for (uint32_t i = 0; i < 16; ++i)
+    {
+        VulkanTexture* texture = Texture();
+        ASSERT_NE(texture, nullptr);
+        InitializeRed(texture);
+    }
+    SubmitAndWait(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+    commandList = RHICommandList::Create(context);
+    ASSERT_NE(commandList, nullptr);
+
+    for (uint32_t count : {16u, 3u, 3u})
+    {
+        RHIBatchedShaderParameters parameters;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            parameters.AddResourceParam(*pipeline->GetShader()->GetSRDByLocation(1, 0), textures[i], nullptr, i);
+            parameters.AddResourceParam(*pipeline->GetShader()->GetSRDByLocation(1, 1), sampler, nullptr, i);
+        }
+        parameters.AddResourceParam(*pipeline->GetShader()->GetSRDByLocation(1, 2), output, nullptr, 0);
+        commandList->BindPipeline(RHIPipelineType::eCompute, pipeline);
+        commandList->SetShaderParameters(parameters);
+        commandList->Dispatch(1, 1, 1);
+        SubmitRecordedAndWait();
+        ASSERT_FALSE(context->GetRecordingError().IsFailure());
+        if (count == 16)
+        {
+            for (uint32_t i = 3; i < 16; ++i)
+            {
+                session->rhi.DestroyTexture(textures[i]);
+                textures[i] = nullptr;
+            }
+        }
+    }
+}
+
+TEST_F(VulkanBindingIntegrationTest, RecordedListCannotInheritRequiredScalarBinding)
+{
+    RHIPipeline* pipeline = Compute("descriptor_storage.comp.spv");
+    ASSERT_NE(pipeline, nullptr);
+    VulkanBuffer* output = Buffer();
+    ASSERT_NE(output, nullptr);
+    commandList = RHICommandList::Create(context);
+    RHIBatchedShaderParameters parameters;
+    parameters.AddResourceParam(*pipeline->GetShader()->GetSRDByLocation(1, 0), output, nullptr, 0);
+    commandList->BindPipeline(RHIPipelineType::eCompute, pipeline);
+    commandList->SetShaderParameters(parameters);
+    commandList->Dispatch(1, 1, 1);
+    SubmitRecordedAndWait();
+
+    commandList->BindPipeline(RHIPipelineType::eCompute, pipeline);
+    commandList->Dispatch(1, 1, 1);
+    RHICommandList*                     lists[]{commandList};
+    HeapVector<RHIPlatformCommandList*> platform;
+    BindingObserver::suppressedDispatches = 0;
+    test::ScopedVulkanCall<PFN_vkCmdDispatch> suppress(vkCmdDispatch, BindingObserver::SuppressDispatch);
+    const RHIStatus                           result = session->rhi.FinalizeCommandLists({lists, 1}, platform);
+    EXPECT_EQ(result.error.code, RHIErrorCode::eInvalidArgument);
+    EXPECT_TRUE(platform.empty());
+    EXPECT_EQ(BindingObserver::suppressedDispatches, 0u);
+}
+
+TEST_F(VulkanBindingIntegrationTest, RecordedListCannotInheritVertexBuffers)
+{
+    RHIShaderCreateInfo shaderInfo{};
+    test::SetShaderStage(shaderInfo, RHIShaderStage::eVertex, "recording_vertex.vert.spv");
+    test::SetShaderStage(shaderInfo, RHIShaderStage::eFragment, "pipeline.frag.spv");
+    RHIShader* shader = session->rhi.CreateShader(shaderInfo);
+    ASSERT_NE(shader, nullptr);
+    shaders.push_back(shader);
+    VulkanTexture* target = Texture(RHITextureUsageFlagBits::eColorAttachment);
+    ASSERT_NE(target, nullptr);
+    BitField<RHIBufferUsageFlagBits> usage;
+    usage.SetFlag(RHIBufferUsageFlagBits::eVertexBuffer);
+    VulkanBuffer* vertices = TexelBuffer(64, usage);
+    ASSERT_NE(vertices, nullptr);
+    RHIRenderingLayout layout{};
+    layout.SetRenderArea(0, 0, 4, 4);
+    layout.AddColorRenderTarget(DataFormat::eR8G8B8A8UNORM, target, RHIRenderTargetLoadOp::eClear,
+                                RHIRenderTargetStoreOp::eStore);
+    RHIGfxPipelineCreateInfo info{};
+    info.pShader          = shader;
+    info.pRenderingLayout = &layout;
+    info.states.colorBlendState.AddAttachment();
+    RHIPipeline* pipeline = session->rhi.CreatePipeline(info);
+    ASSERT_NE(pipeline, nullptr);
+    pipelines.push_back(pipeline);
+    Transition(target, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0,
+               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    SubmitAndWait(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+    commandList = RHICommandList::Create(context);
+    ASSERT_NE(commandList, nullptr);
+    commandList->BeginRendering(&layout);
+    commandList->BindPipeline(RHIPipelineType::eGraphics, pipeline);
+    commandList->BindVertexBuffer(vertices, 0);
+    commandList->Draw(3, 1, 0, 0);
+    commandList->EndRendering();
+    SubmitRecordedAndWait();
+    ASSERT_FALSE(context->GetRecordingError().IsFailure());
+
+    // The reused list binds no vertex buffer, so the first list's handle must not be drawn.
+    commandList->BeginRendering(&layout);
+    commandList->BindPipeline(RHIPipelineType::eGraphics, pipeline);
+    commandList->Draw(3, 1, 0, 0);
+    commandList->EndRendering();
+    RHICommandList*                     lists[]{commandList};
+    HeapVector<RHIPlatformCommandList*> platform;
+    BindingObserver::suppressedDraws = 0;
+    test::ScopedVulkanCall<PFN_vkCmdDraw> suppress(vkCmdDraw, BindingObserver::SuppressDraw);
+    const RHIStatus                       result = session->rhi.FinalizeCommandLists({lists, 1}, platform);
+    EXPECT_EQ(result.error.code, RHIErrorCode::eInvalidArgument);
+    EXPECT_STREQ(result.error.operation, "Bind vertex buffers");
+    EXPECT_TRUE(platform.empty());
+    EXPECT_EQ(BindingObserver::suppressedDraws, 0u);
+}
+
+TEST_F(VulkanBindingIntegrationTest, DescriptorAllocationPreservesNativeCauseAndCanRetry)
+{
+    RHIPipeline* pipeline = Compute("descriptor_storage.comp.spv");
+    ASSERT_NE(pipeline, nullptr);
+    VulkanBuffer* output = Buffer();
+    ASSERT_NE(output, nullptr);
+    SetOutput(pipeline, output, 1, 0);
+    context->RHIDispatch(1, 1, 1);
+    SubmitAndWait();
+    // Fail a new content key in an existing pool. A device allocation failure
+    // must not advance to another pool and hide the original error.
+    output = Buffer();
+    ASSERT_NE(output, nullptr);
+    commandList = RHICommandList::Create(context);
+    RHIBatchedShaderParameters parameters;
+    parameters.AddResourceParam(*pipeline->GetShader()->GetSRDByLocation(1, 0), output, nullptr, 0);
+    commandList->BindPipeline(RHIPipelineType::eCompute, pipeline);
+    commandList->SetShaderParameters(parameters);
+    commandList->Dispatch(1, 1, 1);
+    RHICommandList*                     lists[]{commandList};
+    HeapVector<RHIPlatformCommandList*> platform;
+    DescriptorFailureProbe::allocationCalls = 0;
+    BindingObserver::suppressedDispatches   = 0;
+    {
+        test::ScopedVulkanCall<PFN_vkAllocateDescriptorSets> fail(vkAllocateDescriptorSets, DescriptorFailureProbe::Allocate);
+        test::ScopedVulkanCall<PFN_vkCmdDispatch>            suppress(vkCmdDispatch, BindingObserver::SuppressDispatch);
+        const RHIStatus                                      result = session->rhi.FinalizeCommandLists({lists, 1}, platform);
+        EXPECT_EQ(result.error.code, RHIErrorCode::eOutOfDeviceMemory);
+        EXPECT_EQ(result.error.nativeCode, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+        EXPECT_STREQ(result.error.operation, "vkAllocateDescriptorSets");
+        EXPECT_EQ(DescriptorFailureProbe::allocationCalls, 1u);
+        EXPECT_EQ(BindingObserver::suppressedDispatches, 0u);
+        EXPECT_TRUE(platform.empty());
+    }
+    SubmitRecordedAndWait();
+    EXPECT_FALSE(context->GetRecordingError().IsFailure());
+}
+
+TEST_F(VulkanBindingIntegrationTest, DescriptorPoolCreationPreservesCauseWithoutPoisoningValidation)
+{
+    RHIPipeline* pipeline = Compute("descriptor_storage.comp.spv");
+    ASSERT_NE(pipeline, nullptr);
+    VulkanBuffer* output = Buffer();
+    ASSERT_NE(output, nullptr);
+    RHIBatchedShaderParameters parameters;
+    parameters.AddResourceParam(*pipeline->GetShader()->GetSRDByLocation(1, 0), output, nullptr, 0);
+    context->RHISetShaderParameters(parameters);
+    DescriptorFailureProbe::poolCalls     = 0;
+    BindingObserver::suppressedDispatches = 0;
+    {
+        test::ScopedVulkanCall<PFN_vkCreateDescriptorPool> fail(vkCreateDescriptorPool, DescriptorFailureProbe::CreatePool);
+        test::ScopedVulkanCall<PFN_vkCmdDispatch>          suppress(vkCmdDispatch, BindingObserver::SuppressDispatch);
+        context->RHIDispatch(1, 1, 1);
+        EXPECT_EQ(context->GetRecordingError().code, RHIErrorCode::eOutOfHostMemory);
+        EXPECT_EQ(context->GetRecordingError().nativeCode, VK_ERROR_OUT_OF_HOST_MEMORY);
+        EXPECT_STREQ(context->GetRecordingError().operation, "vkCreateDescriptorPool");
+        EXPECT_EQ(DescriptorFailureProbe::poolCalls, 1u);
+        EXPECT_EQ(BindingObserver::suppressedDispatches, 0u);
+    }
+    context->RHIDiscardRecording();
+    context->RHIBindPipeline(pipeline);
+    // The previous native failure must not be mistaken for this missing scalar.
+    context->RHIDispatch(1, 1, 1);
+    EXPECT_EQ(context->GetRecordingError().code, RHIErrorCode::eInvalidArgument);
+    EXPECT_EQ(context->GetRecordingError().nativeCode, 0);
+    context->RHIDiscardRecording();
+    context->RHIBindPipeline(pipeline);
+    context->RHISetShaderParameters(parameters);
+    context->RHIDispatch(1, 1, 1);
+    ASSERT_FALSE(context->GetRecordingError().IsFailure());
+    SubmitAndWait();
 }
 
 TEST_F(VulkanBindingIntegrationTest, UnpopulatedPartiallyBoundSetIsResolved)
@@ -764,6 +997,18 @@ TEST_F(VulkanBindingIntegrationTest, MisalignedUniformOffsetCannotPoisonTheOffse
     EXPECT_EQ(first, 1u);
     ASSERT_EQ(sets.size(), 1u);
     EXPECT_NE(sets[0], VK_NULL_HANDLE);
+    const VkDescriptorSet cached = sets[0];
+
+    // A dirty cache hit still validates offsets, without issuing another write.
+    ASSERT_TRUE(state.SetShaderParameters(parameters));
+    EXPECT_FALSE(state.FlushPendingDescriptorWrites(context, sets, first, offsets));
+    EXPECT_EQ(ReviewWriteObserver::calls, 1u);
+    EXPECT_TRUE(sets.empty());
+    ASSERT_TRUE(state.SetShaderParameters(corrected));
+    ASSERT_TRUE(state.FlushPendingDescriptorWrites(context, sets, first, offsets));
+    ASSERT_EQ(sets.size(), 1u);
+    EXPECT_EQ(sets[0], cached);
+    EXPECT_EQ(ReviewWriteObserver::calls, 1u);
 }
 
 TEST_F(VulkanBindingIntegrationTest, BottomLevelStructureCannotFillTopLevelDescriptor)
@@ -1134,7 +1379,7 @@ TEST_F(VulkanBindingIntegrationTest, UniformElementOffsetsFollowBindingOrderAndR
 
     uint32_t first = 0;
 
-    state.FlushPendingDescriptorWrites(context, sets, first, offsets);
+    ASSERT_TRUE(state.FlushPendingDescriptorWrites(context, sets, first, offsets));
 
     ASSERT_EQ(first, test::kLocalResourceSet);
     ASSERT_EQ(sets.size(), 1u);
@@ -1147,7 +1392,7 @@ TEST_F(VulkanBindingIntegrationTest, UniformElementOffsetsFollowBindingOrderAndR
 
     state.SetShaderParameters(changed);
 
-    state.FlushPendingDescriptorWrites(context, sets, first, offsets);
+    ASSERT_TRUE(state.FlushPendingDescriptorWrites(context, sets, first, offsets));
 
     ASSERT_EQ(first, test::kLocalResourceSet);
     ASSERT_EQ(sets.size(), 1u);

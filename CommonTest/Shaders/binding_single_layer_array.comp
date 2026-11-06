@@ -1,0 +1,9 @@
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 1, binding = 0) uniform sampler inputSampler;
+layout(set = 1, binding = 1) uniform texture2DArray inputImage;
+layout(rgba8, set = 1, binding = 2) writeonly uniform image2DArray outputImage;
+void main()
+{
+    imageStore(outputImage, ivec3(0), texelFetch(sampler2DArray(inputImage, inputSampler), ivec3(0), 0));
+}

@@ -1705,6 +1705,51 @@ TEST_F(VulkanRecordingIntegrationTest, ChangedVertexBufferAndOffsetSelectDiffere
     CheckPixel(readback, 6, 4, Color(0, 1, 0, 1));
 }
 
+TEST_F(VulkanRecordingIntegrationTest, DualSourceBlendingReadsTheSecondFragmentOutput)
+{
+    if (session->rhi.GetDevice()->GetPhysicalDeviceFeatures().dualSrcBlend == VK_FALSE)
+    {
+        GTEST_SKIP() << "The device does not support dual-source blending";
+    }
+
+    VulkanTexture* target                            = Texture();
+
+    RHIRenderingLayout layout                        = Layout(target);
+
+    RHIGfxPipelineCreateInfo info                    = PipelineInfo(Shader("pipeline_dual_source.frag.spv"), layout);
+
+    RHIGfxPipelineColorBlendState::Attachment& blend = info.states.colorBlendState.attachments[0];
+
+    blend.enableBlend                                = true;
+
+    blend.srcColorBlendFactor                        = RHIBlendFactor::eSrc1Color;
+
+    blend.srcAlphaBlendFactor                        = RHIBlendFactor::eOne;
+
+    RHIPipeline* pipeline                            = Graphics(info);
+
+    ASSERT_NE(pipeline, nullptr);
+
+    Transition(target, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+    context->RHIBeginRendering(&layout);
+
+    context->RHIBindPipeline(pipeline);
+
+    DynamicState();
+
+    context->RHIDraw(3, 1, 0, 0);
+
+    context->RHIEndRendering();
+
+    VulkanBuffer* readback = Copy(target);
+
+    SubmitAndWait();
+
+    // White multiplied by the second output keeps only red.
+    CheckPixel(readback, 4, 4, Color(1, 0, 0, 1));
+}
+
 TEST_F(VulkanRecordingIntegrationTest, ExternalNativeStateCanBeInvalidatedBeforeResumingRHI)
 {
     VulkanTexture* target         = Texture();

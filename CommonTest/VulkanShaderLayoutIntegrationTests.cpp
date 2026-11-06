@@ -77,6 +77,37 @@ void ExpectShaderRejectedBeforeNativeCreation(test::VulkanSession& session, cons
     }
 }
 
+class ScopedDisabledFeature
+{
+public:
+    ScopedDisabledFeature(VulkanDevice* device, VkBool32 VkPhysicalDeviceFeatures::* member) :
+        value(const_cast<VkPhysicalDeviceFeatures&>(device->GetPhysicalDeviceFeatures()).*member), previous(value)
+    {
+        value = VK_FALSE;
+    }
+    ~ScopedDisabledFeature()
+    {
+        value = previous;
+    }
+
+private:
+    VkBool32& value;
+    VkBool32  previous;
+};
+
+void ExpectGraphicsRejectedBeforeNativeCreation(test::VulkanSession& session, const RHIGfxPipelineCreateInfo& info)
+{
+    RejectedNativeCreation::pipelines = 0;
+    test::ScopedVulkanCall<PFN_vkCreateGraphicsPipelines> pipeline(vkCreateGraphicsPipelines, RejectedNativeCreation::Graphics);
+    RHIPipeline*                                          rejected = session.rhi.CreatePipeline(info);
+    EXPECT_EQ(rejected, nullptr);
+    EXPECT_EQ(RejectedNativeCreation::pipelines, 0u);
+    if (rejected != nullptr)
+    {
+        session.rhi.DestroyPipeline(rejected);
+    }
+}
+
 class ScopedFragmentDescriptors
 {
 public:
@@ -261,4 +292,179 @@ TEST(VulkanShaderLayoutIntegrationTest, FragmentColorAttachmentCountsBeforeNativ
         }
     }
     session.rhi.DestroyShader(shader);
+}
+
+TEST(VulkanShaderLayoutIntegrationTest, SpecializationTypeMismatchIsRejectedBeforeNativeCreation)
+{
+    test::VulkanSession session;
+    RHIShaderCreateInfo source;
+    test::SetShaderStage(source, RHIShaderStage::eCompute, "pipeline_specialization.comp.spv");
+    RHIShader* shader = session.rhi.CreateShader(source);
+    ASSERT_NE(shader, nullptr);
+    const RHIShaderCreateInfo reusable = shader->GetCreateInfo();
+    struct OverrideCase
+    {
+        uint32_t                     id;
+        RHIShaderSpecializationValue value;
+    };
+    const OverrideCase cases[] = {{0, 1}, {1, true}, {2, 1}, {2, RHIShaderSpecializationValue{}}};
+    for (const OverrideCase& testCase : cases)
+    {
+        SCOPED_TRACE(testCase.id);
+        RHIShaderCreateInfo invalid                  = reusable;
+        invalid.specializationConstants[testCase.id] = testCase.value;
+        ExpectShaderRejectedBeforeNativeCreation(session, invalid);
+    }
+    RHIShaderCreateInfo valid     = reusable;
+    valid.specializationConstants = {{0, false}, {1, -19}, {2, 4.5f}};
+    RHIShader* specialized        = session.rhi.CreateShader(valid);
+    EXPECT_NE(specialized, nullptr);
+    if (specialized != nullptr)
+    {
+        session.rhi.DestroyShader(specialized);
+    }
+    session.rhi.DestroyShader(shader);
+}
+
+TEST(VulkanShaderLayoutIntegrationTest, DisabledGraphicsFeaturesAreRejectedBeforeNativeCreation)
+{
+    test::VulkanSession session;
+    RHIShaderCreateInfo shaderInfo;
+    test::SetShaderStage(shaderInfo, RHIShaderStage::eVertex, "pipeline.vert.spv");
+    test::SetShaderStage(shaderInfo, RHIShaderStage::eFragment, "pipeline.frag.spv");
+    RHIShader* shader = session.rhi.CreateShader(shaderInfo);
+    ASSERT_NE(shader, nullptr);
+    struct FeatureCase
+    {
+        const char* name;
+        VkBool32 VkPhysicalDeviceFeatures::* feature;
+        RHIGfxPipelineStates                 states;
+        uint32_t                             colorCount{1};
+    };
+    FeatureCase cases[]                          = {{"wireframe", &VkPhysicalDeviceFeatures::fillModeNonSolid},
+                                                    {"depth clamp", &VkPhysicalDeviceFeatures::depthClamp},
+                                                    {"depth bounds", &VkPhysicalDeviceFeatures::depthBounds},
+                                                    {"alpha to one", &VkPhysicalDeviceFeatures::alphaToOne},
+                                                    {"sample shading", &VkPhysicalDeviceFeatures::sampleRateShading},
+                                                    {"logic operation", &VkPhysicalDeviceFeatures::logicOp},
+                                                    {"depth bias clamp", &VkPhysicalDeviceFeatures::depthBiasClamp},
+                                                    {"wide lines", &VkPhysicalDeviceFeatures::wideLines},
+                                                    {"independent blending", &VkPhysicalDeviceFeatures::independentBlend},
+                                                    {"dual source blending", &VkPhysicalDeviceFeatures::dualSrcBlend},
+                                                    {"adjacency topology", &VkPhysicalDeviceFeatures::geometryShader}};
+    cases[0].states.rasterizationState.wireframe = true;
+    cases[1].states.rasterizationState.enableDepthClamp     = true;
+    cases[2].states.depthStencilState.enableDepthBoundsTest = true;
+    cases[3].states.multiSampleState.enableAlphaToOne       = true;
+    cases[4].states.multiSampleState.enableSampleShading    = true;
+    cases[5].states.colorBlendState.enableLogicOp           = true;
+    cases[6].states.rasterizationState.enableDepthBias      = true;
+    cases[6].states.rasterizationState.depthBiasClamp       = 1.0f;
+    cases[7].states.rasterizationState.lineWidth            = 2.0f;
+    cases[8].colorCount                                     = 2;
+    cases[8].states.colorBlendState.AddAttachment(); // The other native attachment is zero/write-disabled.
+    cases[9].states.colorBlendState.AddAttachment();
+    cases[9].states.colorBlendState.attachments[0].enableBlend         = true;
+    cases[9].states.colorBlendState.attachments[0].srcColorBlendFactor = RHIBlendFactor::eSrc1Color;
+    cases[10].states.primitiveType                                     = RHIDrawPrimitiveType::eTriangleListWithAdjacency;
+    RHIRenderingLayout layout;
+    layout.SetRenderArea(0, 0, 1, 1);
+    layout.colorRenderTargets[0].format = layout.colorRenderTargets[1].format = DataFormat::eR8G8B8A8UNORM;
+    RHIGfxPipelineCreateInfo info;
+    info.pShader          = shader;
+    info.pRenderingLayout = &layout;
+    for (const FeatureCase& testCase : cases)
+    {
+        SCOPED_TRACE(testCase.name);
+        ScopedDisabledFeature disabled(session.rhi.GetDevice(), testCase.feature);
+        layout.numColorRenderTargets = testCase.colorCount;
+        info.states                  = testCase.states;
+        ExpectGraphicsRejectedBeforeNativeCreation(session, info);
+    }
+    // Unused static values are legal when their corresponding state is dynamic.
+    info.states                                    = {};
+    info.states.rasterizationState.lineWidth       = 2.0f;
+    info.states.rasterizationState.enableDepthBias = true;
+    info.states.rasterizationState.depthBiasClamp  = 1.0f;
+    info.states.dynamicStates.Enable(RHIDynamicState::eLineWidth, RHIDynamicState::eDepthBias);
+    layout.numColorRenderTargets = 2; // Identical default attachments do not require independentBlend.
+    {
+        ScopedDisabledFeature wideLines(session.rhi.GetDevice(), &VkPhysicalDeviceFeatures::wideLines);
+        ScopedDisabledFeature depthBiasClamp(session.rhi.GetDevice(), &VkPhysicalDeviceFeatures::depthBiasClamp);
+        ScopedDisabledFeature independentBlend(session.rhi.GetDevice(), &VkPhysicalDeviceFeatures::independentBlend);
+        RHIPipeline*          valid = session.rhi.CreatePipeline(info);
+        EXPECT_NE(valid, nullptr);
+        if (valid != nullptr)
+        {
+            session.rhi.DestroyPipeline(valid);
+        }
+    }
+    session.rhi.DestroyShader(shader);
+}
+
+TEST(VulkanShaderLayoutIntegrationTest, DualSourceBlendingIsEnabledWithinItsColorTargetLimit)
+{
+    test::VulkanSession      session;
+    VulkanDevice*            device = session.rhi.GetDevice();
+    VkPhysicalDeviceFeatures supported{};
+    vkGetPhysicalDeviceFeatures(device->GetPhysicalDeviceHandle(), &supported);
+    EXPECT_EQ(device->GetPhysicalDeviceFeatures().dualSrcBlend, supported.dualSrcBlend);
+    const uint32_t limit = device->GetPhysicalDeviceProperties().limits.maxFragmentDualSrcAttachments;
+    if (supported.dualSrcBlend == VK_FALSE || limit >= MAX_NUM_COLOR_ATTACHMENTS)
+    {
+        GTEST_SKIP() << "The device cannot exceed its dual-source color target limit";
+    }
+    RHIShaderCreateInfo shaderInfo;
+    test::SetShaderStage(shaderInfo, RHIShaderStage::eVertex, "pipeline.vert.spv");
+    test::SetShaderStage(shaderInfo, RHIShaderStage::eFragment, "pipeline_dual_source.frag.spv");
+    RHIShader* shader = session.rhi.CreateShader(shaderInfo);
+    ASSERT_NE(shader, nullptr);
+    RHIRenderingLayout layout;
+    layout.SetRenderArea(0, 0, 1, 1);
+    layout.numColorRenderTargets = limit + 1;
+    for (uint32_t index = 0; index < layout.numColorRenderTargets; ++index)
+    {
+        layout.colorRenderTargets[index].format = DataFormat::eR8G8B8A8UNORM;
+    }
+    RHIGfxPipelineCreateInfo info;
+    info.pShader          = shader;
+    info.pRenderingLayout = &layout;
+    info.states.colorBlendState.AddAttachment();
+    info.states.colorBlendState.attachments[0].enableBlend         = true;
+    info.states.colorBlendState.attachments[0].srcColorBlendFactor = RHIBlendFactor::eSrc1Color;
+    ExpectGraphicsRejectedBeforeNativeCreation(session, info);
+    session.rhi.DestroyShader(shader);
+}
+
+TEST(VulkanShaderLayoutIntegrationTest, GraphicsPipelineRequiresVertexAndExcludesComputeStages)
+{
+    test::VulkanSession session;
+    RHIRenderingLayout  layout;
+    layout.SetRenderArea(0, 0, 1, 1);
+    layout.numColorRenderTargets        = 1;
+    layout.colorRenderTargets[0].format = DataFormat::eR8G8B8A8UNORM;
+    for (uint32_t stageCase = 0; stageCase < 3; ++stageCase)
+    {
+        SCOPED_TRACE(stageCase);
+        RHIShaderCreateInfo shaderInfo;
+        if (stageCase == 0)
+        {
+            test::SetShaderStage(shaderInfo, RHIShaderStage::eFragment, "pipeline.frag.spv");
+        }
+        else
+        {
+            test::SetShaderStage(shaderInfo, RHIShaderStage::eCompute, "pipeline_specialization.comp.spv");
+            if (stageCase == 2)
+            {
+                test::SetShaderStage(shaderInfo, RHIShaderStage::eVertex, "pipeline.vert.spv");
+            }
+        }
+        RHIShader* shader = session.rhi.CreateShader(shaderInfo);
+        ASSERT_NE(shader, nullptr);
+        RHIGfxPipelineCreateInfo info;
+        info.pShader          = shader;
+        info.pRenderingLayout = &layout;
+        ExpectGraphicsRejectedBeforeNativeCreation(session, info);
+        session.rhi.DestroyShader(shader);
+    }
 }

@@ -27,6 +27,7 @@ struct AttachmentObserver
     static inline VkImageView                   colorView;
     static inline bool                          failView;
     static inline uint32_t                      failViewAt;
+    static inline VkImageViewType               lastViewType;
 
     static VKAPI_ATTR VkResult VKAPI_CALL CreatePipeline(VkDevice                            device,
                                                          VkPipelineCache                     cache,
@@ -67,6 +68,7 @@ struct AttachmentObserver
                                                      VkImageView*                 view)
     {
         ++viewCreates;
+        lastViewType = info->viewType;
 
         if (failView || viewCreates == failViewAt)
         {
@@ -1108,6 +1110,119 @@ TEST_F(VulkanAttachmentIntegrationTest, BlockCompressedMipUploadsPreserveBlocksA
         }
         readback->Unmap();
     }
+}
+
+TEST_F(VulkanAttachmentIntegrationTest, SingleLayerArrayViewsSampleAndStoreWithoutPaddedImages)
+{
+    VulkanTexture* input =
+        Texture(DataFormat::eR8G8B8A8UNORM, 2, 3, RHITextureType::e2D, SampleCount::e1, 8, RHITextureUsageFlagBits::eSampled);
+    VulkanTexture* output =
+        Texture(DataFormat::eR8G8B8A8UNORM, 1, 1, RHITextureType::e2D, SampleCount::e1, 8, RHITextureUsageFlagBits::eStorage);
+    ASSERT_NE(input, nullptr);
+    ASSERT_NE(output, nullptr);
+    RHITextureViewCreateInfo view{};
+    view.format               = input->GetFormat();
+    view.type                 = RHITextureType::e2D;
+    view.baseMipLevel         = 1;
+    view.baseArrayLayer       = 2;
+    view.arrayView            = true;
+    RHITextureView* inputView = input->CreateView(view);
+    ASSERT_NE(inputView, nullptr);
+    EXPECT_EQ(AttachmentObserver::lastViewType, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
+    view.baseMipLevel = view.baseArrayLayer = 0;
+    RHITextureView* outputView              = output->CreateView(view);
+    ASSERT_NE(outputView, nullptr);
+    EXPECT_EQ(output->GetArrayLayers(), 1u);
+    EXPECT_EQ(AttachmentObserver::lastViewType, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
+
+    RHIShaderCreateInfo shaderInfo{};
+    shaderInfo.stageFlags.SetFlag(RHIShaderStageFlagBits::eCompute);
+    shaderInfo.spirvFileName[ToUnderlying(RHIShaderStage::eCompute)] =
+        std::filesystem::relative(std::filesystem::path(RDG_REFLECTION_TEST_PATH) / "binding_single_layer_array.comp.spv",
+                                  SPV_SHADER_PATH)
+            .generic_string();
+    RHIShader* shader = session->rhi.CreateShader(shaderInfo);
+    ASSERT_NE(shader, nullptr);
+    shaders.push_back(shader);
+    RHIPipeline* pipeline = session->rhi.CreatePipeline(RHIComputePipelineCreateInfo{shader});
+    ASSERT_NE(pipeline, nullptr);
+    pipelines.push_back(pipeline);
+    RHISampler* sampler = session->rhi.CreateSampler({});
+    ASSERT_NE(sampler, nullptr);
+    samplers.push_back(sampler);
+    Transition(input, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    const VkClearColorValue       clear{1.0f, 1.0f, 1.0f, 1.0f};
+    const VkImageSubresourceRange range = input->GetVkSubresourceRange();
+    vkCmdClearColorImage(Commands(), input->GetVkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &range);
+    Transition(input, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    Transition(output, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    const VkClearColorValue       zero{};
+    const VkImageSubresourceRange outputRange = output->GetVkSubresourceRange();
+    vkCmdClearColorImage(Commands(), output->GetVkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &outputRange);
+    Transition(output, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    context->RHIBindPipeline(pipeline);
+    RHIBatchedShaderParameters parameters;
+    parameters.AddResourceParam(*shader->GetSRDByLocation(1, 0), sampler, nullptr, 0);
+    parameters.AddResourceParam(*shader->GetSRDByLocation(1, 1), inputView, nullptr, 0);
+    parameters.AddResourceParam(*shader->GetSRDByLocation(1, 2), outputView, nullptr, 0);
+    context->RHISetShaderParameters(parameters.GetView());
+    context->RHIDispatch(1, 1, 1);
+    ASSERT_FALSE(context->GetRecordingError().IsFailure());
+    Transition(output, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VulkanBuffer* readback = Buffer();
+    ASSERT_NE(readback, nullptr);
+    CopyAll(output, readback, VK_IMAGE_ASPECT_COLOR_BIT, 4);
+    SubmitAndWait();
+    const uint32_t* pixels = reinterpret_cast<const uint32_t*>(readback->Map());
+    ASSERT_NE(pixels, nullptr);
+    EXPECT_EQ(pixels[0], 0xffffffffu);
+    EXPECT_EQ(pixels[1], 0u);
+    readback->Unmap();
+}
+
+TEST_F(VulkanAttachmentIntegrationTest, ExplicitArrayViewsValidateDimensionsAndCubeFeature)
+{
+    for (RHITextureType type : {RHITextureType::e1D, RHITextureType::e2D, RHITextureType::eCube})
+    {
+        RHITextureCreateInfo info{};
+        info.type   = type;
+        info.format = DataFormat::eR8G8B8A8UNORM;
+        info.width = info.height = 1;
+        info.arrayLayers         = type == RHITextureType::eCube ? 6 : 1;
+        info.usageFlags.SetFlag(RHITextureUsageFlagBits::eSampled);
+        RHITexture* texture = session->rhi.CreateTexture(info);
+        ASSERT_NE(texture, nullptr);
+        textures.push_back(texture);
+        RHITextureViewCreateInfo view{};
+        view.type               = type;
+        view.format             = info.format;
+        view.arrayLayers        = info.arrayLayers;
+        view.arrayView          = true;
+        const uint32_t  creates = AttachmentObserver::viewCreates;
+        RHITextureView* array   = texture->CreateView(view);
+        if (type == RHITextureType::eCube && !session->rhi.QueryGPUInfo().supportImageCubeArray)
+        {
+            EXPECT_EQ(array, nullptr);
+            EXPECT_EQ(AttachmentObserver::viewCreates, creates);
+        }
+        else
+        {
+            EXPECT_NE(array, nullptr);
+            EXPECT_EQ(AttachmentObserver::lastViewType, type == RHITextureType::e1D   ? VK_IMAGE_VIEW_TYPE_1D_ARRAY
+                                                        : type == RHITextureType::e2D ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                                                                      : VK_IMAGE_VIEW_TYPE_CUBE_ARRAY);
+        }
+    }
+    VulkanTexture* volume =
+        Texture(DataFormat::eR8G8B8A8UNORM, 1, 1, RHITextureType::e3D, SampleCount::e1, 8, RHITextureUsageFlagBits::eSampled);
+    ASSERT_NE(volume, nullptr);
+    RHITextureViewCreateInfo view{};
+    view.type              = RHITextureType::e3D;
+    view.format            = volume->GetFormat();
+    view.arrayView         = true;
+    const uint32_t creates = AttachmentObserver::viewCreates;
+    EXPECT_EQ(volume->CreateView(view), nullptr);
+    EXPECT_EQ(AttachmentObserver::viewCreates, creates);
 }
 
 TEST_F(VulkanAttachmentIntegrationTest, BC4AndBC5SamplingExposeNativeChannelsWithoutNormalReconstruction)

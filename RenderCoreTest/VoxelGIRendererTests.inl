@@ -237,7 +237,8 @@ TEST_F(RenderCoreTest, VoxelGIFailedAllocationsPreserveVisualizationAndAllowRetr
 
 TEST_F(RenderCoreTest, VoxelGIFailedMipViewsCanRetryWithoutDuplicatingAlbedoViews)
 {
-    for (uint32_t failure = 1; failure <= 8; ++failure)
+    // The fallback array view precedes four radiance and four albedo mip views.
+    for (uint32_t failure = 1; failure <= 9; ++failure)
     {
         SCOPED_TRACE(failure);
         TestVoxelVolumes volumes(device, DataFormat::eR8G8B8A8UNORM);
@@ -251,8 +252,8 @@ TEST_F(RenderCoreTest, VoxelGIFailedMipViewsCanRetryWithoutDuplicatingAlbedoView
         const uint32_t beforeRetry     = rhi->textureViewCreations;
         rhi->failTextureViewCreationAt = 0;
         ASSERT_TRUE(gi.Init());
-        const uint32_t retainedAlbedoViews = failure > 4 ? failure - 5 : 0;
-        EXPECT_EQ(rhi->textureViewCreations - beforeRetry, 8 - retainedAlbedoViews);
+        const uint32_t retainedAlbedoViews = failure > 5 ? failure - 6 : 0;
+        EXPECT_EQ(rhi->textureViewCreations - beforeRetry, 9 - retainedAlbedoViews);
         const uint32_t initializedViews = rhi->textureViewCreations;
         EXPECT_TRUE(gi.Init());
         EXPECT_EQ(rhi->textureViewCreations, initializedViews);

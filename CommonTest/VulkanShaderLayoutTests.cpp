@@ -1,4 +1,5 @@
 #include "Graphics/VulkanRHI/VulkanPipeline.h"
+#include "Graphics/VulkanRHI/VulkanDescriptorPool.h"
 #include <gtest/gtest.h>
 #include <limits>
 
@@ -247,4 +248,23 @@ TEST_F(VulkanShaderLayoutLimitTest, DescriptorAndHeapSumsCannotWrapAtUint32Max)
     indexing.maxPerStageUpdateAfterBindResources = maximum;
     capacities.slots                             = {maximum, 1, 0};
     EXPECT_FALSE(Fits());
+}
+
+TEST(VulkanBindlessLimitTest, SeparateSamplersDoNotConsumeStageResourceBudget)
+{
+    RHIBindlessHeapCapacities capacities;
+    capacities.slots = {2048, 64, 128};
+    VkPhysicalDeviceDescriptorIndexingProperties limits{};
+    limits.maxDescriptorSetUpdateAfterBindSampledImages      = 2112;
+    limits.maxPerStageDescriptorUpdateAfterBindSampledImages = 2112;
+    limits.maxDescriptorSetUpdateAfterBindSamplers           = 128;
+    limits.maxPerStageDescriptorUpdateAfterBindSamplers      = 128;
+    limits.maxPerStageUpdateAfterBindResources               = 2112;
+    limits.maxUpdateAfterBindDescriptorsInAllPools           = 2240;
+    EXPECT_TRUE(BindlessHeapsFitLimits(limits, capacities));
+    --limits.maxPerStageUpdateAfterBindResources;
+    EXPECT_FALSE(BindlessHeapsFitLimits(limits, capacities));
+    ++limits.maxPerStageUpdateAfterBindResources;
+    --limits.maxUpdateAfterBindDescriptorsInAllPools;
+    EXPECT_FALSE(BindlessHeapsFitLimits(limits, capacities));
 }
