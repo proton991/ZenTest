@@ -476,6 +476,86 @@ void EnableDistanceFieldTestDevice(RenderDevice* device)
     }
 }
 
+TEST_F(RenderCoreTest, DistanceFieldDerivedCapacitiesFitNativeAllocationBudget)
+{
+    sceneInputs.vertices  = Buffer(sizeof(asset::Vertex));
+    sceneInputs.indices   = Buffer();
+    sceneInputs.nodes     = Buffer();
+    sceneInputs.materials = Buffer();
+    sceneInputs.uv        = Buffer();
+    // The generation's separately allocated range table must be charged alongside shared scratch.
+    // Its 4,352-byte native allocation exceeds any incidental slack between capacity steps.
+    for (uint32_t instance = 0; instance < 257; ++instance)
+    {
+        sceneInputs.shadowCasters.push_back({sg::AABB(Vec3(-1), Vec3(1)), 1});
+        sceneInputs.triangleRanges.push_back({instance * 100, 100, GI_STATIC, Vec4(0)});
+    }
+    EnableDistanceFieldTestDevice(device);
+    sg::Scene source;
+    source.GetAABB() = sg::AABB(Vec3(-1), Vec3(1));
+    SceneData data{};
+    data.pScene = &source;
+    RenderScene scene(device, data);
+    // This fixture injects GPU records without scene nodes; retain its authored synthetic bounds.
+    source.GetAABB() = sg::AABB(Vec3(-1), Vec3(1));
+    ASSERT_EQ(scene.GetVoxelTriangleCount(), 25700u);
+    DistanceFieldSceneSettings settings;
+    settings.cellsPerAxis          = 4;
+    settings.atlasTexelsPerAxis    = 8;
+    settings.jobCapacity           = 1;
+    settings.referenceCapacity     = 1;
+    settings.deriveCapacities      = true;
+    rhi->bufferAllocationAlignment = 256;
+    rhi->bufferAllocationPadding   = 0;
+    for (uint32_t scenario = 0; scenario < 3; ++scenario)
+    {
+        SCOPED_TRACE(scenario);
+        // The proportional payload estimate fills this budget, but every native buffer rounds up.
+        // Also verify that an unaffordable floor and a failed requirements query allocate nothing.
+        settings.scratchBudgetBytes    = scenario == 1 ? 1 : 65539;
+        rhi->failBufferAllocationQuery = scenario == 2;
+        DistanceFieldScene field(device, settings);
+        const uint32_t     creations = rhi->bufferCreations;
+        RenderGraph&       graph     = *device->GetCurrentFrameRDG();
+        ASSERT_TRUE(graph.Begin());
+        const DistanceFieldScene::State state = field.BuildRenderGraph(scene);
+        if (scenario == 0)
+        {
+            ASSERT_NE(state, DistanceFieldScene::State::Failed) << field.GetFailureReason();
+            EXPECT_LE(field.GetScratchBytes(), settings.scratchBudgetBytes);
+            EXPECT_GT(field.GetScratchBytes(), settings.scratchBudgetBytes - 4096);
+            uint32_t rangeBuffers = 0;
+            for (const RHIBufferCreateInfo& info : rhi->createdBufferInfos)
+            {
+                if (info.tag == NameID("field_instance_ranges"))
+                {
+                    EXPECT_EQ(info.size, 257 * sizeof(glm::uvec4));
+                    ++rangeBuffers;
+                }
+            }
+            EXPECT_EQ(rangeBuffers, 1u);
+        }
+        else
+        {
+            EXPECT_EQ(state, DistanceFieldScene::State::Failed);
+            EXPECT_EQ(rhi->bufferCreations, creations);
+        }
+        graph.AddComputePass(IntentPass("keepalive"));
+        ASSERT_TRUE(graph.End()) << graph.GetResult().message;
+        ASSERT_TRUE(device->ExecuteRenderGraph(graph)) << graph.GetResult().message;
+        field.OnRenderGraphExecuted(RenderFrameResult::eSubmitted);
+        field.Destroy();
+        device->NextFrame();
+    }
+    rhi->failBufferAllocationQuery = false;
+    for (RHIBuffer* buffer :
+         {sceneInputs.vertices, sceneInputs.indices, sceneInputs.nodes, sceneInputs.materials, sceneInputs.uv})
+    {
+        device->DestroyBuffer(buffer);
+    }
+    sceneInputs = {};
+}
+
 // One visibility-only frame: provider selection and bounded field construction, with the frame's callback.
 bool BuildRayQueryFrame(RenderDevice* device, VoxelGIRenderer& gi)
 {
@@ -499,6 +579,72 @@ bool PrepareComputeField(RenderDevice* device, VoxelGIRenderer& gi)
         BuildRayQueryFrame(device, gi);
     }
     return gi.UsesFieldTraversal();
+}
+
+TEST_F(RenderCoreTest, VoxelGIFieldAtlasCanAddressEverySupportedCell)
+{
+    sceneInputs.vertices  = Buffer(sizeof(asset::Vertex));
+    sceneInputs.indices   = Buffer();
+    sceneInputs.nodes     = Buffer();
+    sceneInputs.materials = Buffer();
+    sceneInputs.uv        = Buffer();
+    EnableDistanceFieldTestDevice(device);
+    sg::Scene source;
+    SceneData data{};
+    data.pScene = &source;
+    RenderScene      scene(device, data);
+    TestVoxelVolumes volumes(device, DataFormat::eR8G8B8A8UNORM);
+    volumes.Init();
+    volumes.SetRenderScene(&scene);
+    VoxelGIRenderer gi(device, &volumes);
+    gi.SetRenderScene(&scene);
+    ASSERT_TRUE(gi.Init());
+    for (uint32_t side : {32u, 64u})
+    {
+        SCOPED_TRACE(side);
+        VoxelGISettings settings;
+        settings.fieldResolution = side;
+        settings.SetAllFeatureProviders(VoxelGISettings::RayProvider::Voxel);
+        ASSERT_TRUE(gi.SetSettings(settings));
+        BuildRayQueryFrame(device, gi);
+        ASSERT_TRUE(PrepareComputeField(device, gi));
+        const DistanceFieldScene* field = gi.GetDistanceField();
+        ASSERT_NE(field, nullptr);
+        const DistanceFieldSceneUniform& uniform = field->GetUniform();
+        const uint64_t                   cells   = uint64_t(side) * side * side;
+        const uint64_t                   bricks =
+            uint64_t(uniform.atlasDimensions.x / 8) * (uniform.atlasDimensions.y / 8) * (uniform.atlasDimensions.z / 8);
+        EXPECT_EQ(uniform.dimensions.x, side);
+        EXPECT_GE(uniform.dimensions.y, cells);
+        EXPECT_GE(bricks, cells);
+        EXPECT_LE(field->GetPersistentBytes(), 256ull * 1024 * 1024);
+
+        // A full-capacity replacement must fit beside the published field while geometry changes.
+        const uint64_t generation = gi.GetVisibilityGeneration();
+        const uint32_t queries    = rhi->bufferAllocationQueries;
+        ASSERT_TRUE(scene.CommitGeometryUpdates());
+        ASSERT_TRUE(BuildRayQueryFrame(device, gi));
+        EXPECT_TRUE(gi.UsesFieldTraversal());
+        EXPECT_EQ(gi.GetVisibilityGeneration(), generation);
+        EXPECT_LE(field->GetPersistentBytes(), 512ull * 1024 * 1024);
+        for (uint32_t frame = 0; frame < 8 && !field->IsCurrent(scene); ++frame)
+        {
+            ASSERT_TRUE(BuildRayQueryFrame(device, gi));
+            EXPECT_TRUE(gi.UsesFieldTraversal());
+        }
+        EXPECT_TRUE(field->IsCurrent(scene));
+        EXPECT_NE(gi.GetVisibilityGeneration(), generation);
+        // The refresh needs the same native sizes, so it must not wait on the RHI thread again.
+        EXPECT_EQ(rhi->bufferAllocationQueries, queries);
+    }
+    gi.Destroy();
+    volumes.Destroy();
+    for (RHIBuffer* buffer :
+         {sceneInputs.vertices, sceneInputs.indices, sceneInputs.nodes, sceneInputs.materials, sceneInputs.uv})
+    {
+        device->DestroyBuffer(buffer);
+    }
+    sceneInputs = {};
 }
 
 // One frame of a scene that changes every frame, as an animated one does: the facade's commit

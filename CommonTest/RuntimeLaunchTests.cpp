@@ -171,6 +171,20 @@ TEST(RuntimeLaunch, RejectedInputPreservesPreviousSetup)
     EXPECT_EQ(current.sourcePath, "keep-current");
 }
 
+TEST(RuntimeLaunch, AcceptsNativeAssembliesAndRejectsSourcePaths)
+{
+    RuntimeLaunchSettings settings = Fixture();
+    settings.packagePath           = Utf8(std::filesystem::absolute("sponza.zenscene"));
+    std::string json;
+    std::string error;
+    ASSERT_TRUE(EncodeRuntimeLaunchSettings(settings, json, error)) << error;
+    RuntimeLaunchSettings loaded;
+    ASSERT_TRUE(DecodeRuntimeLaunchSettings(json, loaded, error)) << error;
+    EXPECT_EQ(loaded.packagePath, settings.packagePath);
+    settings.packagePath = Utf8(std::filesystem::absolute("sponza.gltf"));
+    EXPECT_FALSE(ValidateRuntimeLaunchSettings(settings, error));
+}
+
 TEST(RuntimeLaunch, RejectsNonFiniteAndInvalidRangesBeforeWriting)
 {
     RuntimeLaunchSettings settings = Fixture();

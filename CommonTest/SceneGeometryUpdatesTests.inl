@@ -76,7 +76,13 @@ TEST_P(ConeVoxelGIIntegrationTest, SceneTriangleRecordsFollowMasksAndMaterialsAc
     data.numVertices = 4;
     data.numIndices  = 6;
     asset::PrepareScenePlacement(*data.pScene, asset::ScenePlacement::CenterAndNormalize);
+    ASSERT_TRUE(source.GetAssetData().vertexTexCoords.empty());
     RenderScene scene(device, data);
+    // Static construction consumes vertex UVs directly without allocating a
+    // second authored coordinate stream just to apply an empty deformation list.
+    EXPECT_TRUE(source.GetAssetData().vertexTexCoords.empty());
+    ASSERT_EQ(scene.GetVertices().size(), std::size(vertices));
+    EXPECT_EQ(std::memcmp(scene.GetVertices().data(), vertices, sizeof(vertices)), 0);
     scene.LoadSceneMaterials();
     scene.PrepareBuffers();
     RHIBuffer* readback = Buffer(sizeof(glm::uvec4), RHIBufferAllocateType::eCPURead);

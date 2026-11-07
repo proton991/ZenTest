@@ -75,7 +75,8 @@ void AddArraySceneTextures(sg::Scene& scene, DataFormat format)
         pixels->mips.emplace_back(static_cast<size_t>(bytes) * 2, uint8_t(20 + level));
         std::fill(pixels->mips.back().begin() + bytes, pixels->mips.back().end(), uint8_t(40 + level));
     }
-    pixels->bytes = pixels->mips[0];
+    // Image schema 3 owns mip zero only in the explicit chain.
+    ASSERT_TRUE(pixels->bytes.empty());
     for (uint32_t index = 0; index < 3; ++index)
     {
         UniquePtr<sg::Texture> source = MakeUnique<sg::Texture>("array_page");

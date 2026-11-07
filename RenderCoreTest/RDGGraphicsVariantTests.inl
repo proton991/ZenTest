@@ -122,6 +122,94 @@ TEST_F(RenderCoreTest, GraphicsVariantCreationFailureReleasesPartiallyCompiledPi
     EXPECT_TRUE(destroyed.contains(id));
 }
 
+TEST_F(RenderCoreTest, ForwardBlendDrawsTrianglesUntilADeclinedSortedUploadSucceeds)
+{
+    for (const std::array<const char*, 3>& files :
+         {std::array<const char*, 3>{"ForwardBackgroundSP", "SceneRenderer/deferred.vert.spv",
+                                     "SceneRenderer/forward_background.frag.spv"},
+          {"ForwardMaterialSP", "SceneRenderer/offscreen.vert.spv", "SceneRenderer/forward_material.frag.spv"},
+          {"ForwardToneMapSP", "SceneRenderer/deferred.vert.spv", "SceneRenderer/forward_tonemap.frag.spv"}})
+    {
+        RHIShaderCreateInfo info;
+        info.stageFlags.SetFlags(RHIShaderStageFlagBits::eVertex, RHIShaderStageFlagBits::eFragment);
+        info.spirvFileName[ToUnderlying(RHIShaderStage::eVertex)]   = files[1];
+        info.spirvFileName[ToUnderlying(RHIShaderStage::eFragment)] = files[2];
+        reflectedShaderInfos[files[0]]                              = info;
+        CreateTestShaderProgram(device, files[0]);
+    }
+    TestViewport            viewport;
+    HeapVector<RHIBuffer*>  buffers;
+    HeapVector<RHITexture*> textures;
+    AllocateRendererInputs(0, viewport, buffers, textures);
+    // Two triangles sorted against scene order: the second is farther from the camera.
+    sceneInputs.camera.view = Mat4(1.0f);
+    sceneInputs.cpuIndices  = {0, 1, 2, 3, 4, 5};
+    sceneInputs.cpuVertices.resize(6);
+    for (uint32_t vertex = 0; vertex < 6; ++vertex)
+    {
+        sceneInputs.cpuVertices[vertex].pos.z = vertex < 3 ? -1.0f : -2.0f;
+    }
+    sg::MaterialData blend{};
+    blend.surfaceProperties.y = float(sg::AlphaMode::Blend);
+    // A forward-only opaque material keeps this scene out of the deferred path.
+    sg::MaterialData forwardOpaque{};
+    forwardOpaque.materialProperties.w = 1.0f;
+    sceneInputs.materialsData.push_back(blend);
+    sceneInputs.materialsData.push_back(forwardOpaque);
+    sg::Scene    source;
+    sg::Material material("blend");
+    material.index = 0;
+    sg::SubMesh submesh("triangles", 0, 6, 6);
+    submesh.SetMaterial(0, &material);
+    sg::Mesh mesh("mesh");
+    mesh.AddSubMesh(&submesh);
+    sg::Node node(0, "node");
+    node.AddComponent(&mesh);
+    node.SetData(0, Mat4(1.0f));
+    source.AddRenderableNode(&node);
+    SceneData data;
+    data.pScene = &source;
+    RenderScene              scene(device, data);
+    DeferredLightingRenderer lighting(device);
+    lighting.Init();
+    lighting.SetRenderScene(&scene);
+    // Neither the scene nor the view changes, so only the retained upload can end the fallback.
+    for (uint32_t frame = 0; frame < 3; ++frame)
+    {
+        SCOPED_TRACE(frame);
+        rhi->failIndexBufferCreation = frame == 0;
+        rhi->graphics.indexedDraws.clear();
+        RenderGraph& graph = *device->GetCurrentFrameRDG();
+        ASSERT_TRUE(graph.Begin());
+        lighting.BuildRenderGraph(RenderView::FromViewport(viewport));
+        ASSERT_TRUE(graph.End()) << graph.GetResult().message;
+        ASSERT_TRUE(device->ExecuteRenderGraph(graph)) << graph.GetResult().message;
+        device->FlushRHIThread();
+        if (frame == 0)
+        {
+            ASSERT_EQ(rhi->graphics.indexedDraws.size(), 2u);
+            EXPECT_EQ(rhi->graphics.indexedDraws[0], (std::array<uint32_t, 2>{3, 3}));
+            EXPECT_EQ(rhi->graphics.indexedDraws[1], (std::array<uint32_t, 2>{0, 3}));
+        }
+        else
+        {
+            ASSERT_EQ(rhi->graphics.indexedDraws.size(), 1u);
+            EXPECT_EQ(rhi->graphics.indexedDraws[0], (std::array<uint32_t, 2>{0, 6}));
+        }
+        device->NextFrame();
+    }
+    lighting.Destroy();
+    for (RHIBuffer* buffer : buffers)
+    {
+        device->DestroyBuffer(buffer);
+    }
+    for (RHITexture* texture : textures)
+    {
+        device->DestroyTexture(texture);
+    }
+    sceneInputs = {};
+}
+
 TEST_F(RenderCoreTest, GBufferGroupsOpaqueMaskedAndMirroredDrawsWithoutChangingFrontFace)
 {
     for (const std::array<const char*, 2>& files : {std::array<const char*, 2>{"GBufferSP", "SceneRenderer/offscreen.frag.spv"},

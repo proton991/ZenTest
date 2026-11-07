@@ -59,18 +59,23 @@ std::unordered_map<std::string, asset::TextureInfo> textureFiles;
 // Mutable asset facade used with the real renderer/graph implementations below.
 struct SceneInputs
 {
-    const FrameBufferRing*                vertexRing{};
-    RHIBuffer*                            vertices{};
-    RHIBuffer*                            indices{};
-    RHIBuffer*                            nodes{};
-    RHIBuffer*                            materials{};
-    RHIBuffer*                            uv{};
-    HeapVector<RHITextureView*>           textures;
-    HeapVector<RHISampler*>               samplers;
-    EnvTexture                            environment;
-    sg::CameraUniformData                 camera{};
-    SceneUniformData                      uniforms{};
-    HeapVector<RenderScene::ShadowCaster> shadowCasters;
+    const FrameBufferRing*                         vertexRing{};
+    RHIBuffer*                                     vertices{};
+    RHIBuffer*                                     indices{};
+    RHIBuffer*                                     nodes{};
+    RHIBuffer*                                     materials{};
+    RHIBuffer*                                     uv{};
+    HeapVector<RHITextureView*>                    textures;
+    HeapVector<RHISampler*>                        samplers;
+    EnvTexture                                     environment;
+    sg::CameraUniformData                          camera{};
+    SceneUniformData                               uniforms{};
+    HeapVector<RenderScene::ShadowCaster>          shadowCasters;
+    HeapVector<RenderScene::InstanceTriangleRange> triangleRanges;
+    // Forward tests read CPU geometry and materials; other fixtures only supply GPU buffers.
+    HeapVector<asset::Vertex>    cpuVertices;
+    HeapVector<uint32_t>         cpuIndices;
+    HeapVector<sg::MaterialData> materialsData;
 } sceneInputs;
 
 class TestBuffer : public RHIBuffer
@@ -1074,6 +1079,11 @@ public:
     uint32_t                                                bufferCreations{0};
     uint32_t                                                failBufferCreationAt{0};
     uint64_t                                                bufferAllocationPadding{UINT64_MAX};
+    uint64_t                                                bufferAllocationAlignment{1};
+    bool                                                    failBufferAllocationQuery{false};
+    uint32_t                                                bufferAllocationQueries{0};
+    bool                                                    failIndexBufferCreation{false};
+    HeapVector<RHIBufferCreateInfo>                         createdBufferInfos;
     RHIBufferCreateInfo                                     lastBufferInfo;
     uint64_t                                                lastBufferId{0};
     std::thread::id                                         lastBufferCreationThread;
@@ -1285,6 +1295,16 @@ public:
         texture->ReleaseReference();
     }
 
+    uint64_t GetBufferAllocationSize(const RHIBufferCreateInfo& info) override
+    {
+        ++bufferAllocationQueries;
+        const uint64_t padding = bufferAllocationPadding == UINT64_MAX ? 0 : bufferAllocationPadding;
+        return failBufferAllocationQuery
+                 ? 0
+                 : (info.size + bufferAllocationAlignment - 1) / bufferAllocationAlignment * bufferAllocationAlignment
+                       + padding;
+    }
+
     RHIBuffer* CreateBuffer(const RHIBufferCreateInfo& info) override
     {
         RHIBuffer* result = nullptr;
@@ -1293,15 +1313,20 @@ public:
 
         lastBufferCreationThread = std::this_thread::get_id();
 
-        if (bufferCreations != failBufferCreationAt)
+        const bool declined      = failIndexBufferCreation && info.usageFlags.HasFlag(RHIBufferUsageFlagBits::eIndexBuffer);
+
+        if (bufferCreations != failBufferCreationAt && !declined)
         {
-            TestBuffer* buffer              = ZEN_NEW() TestBuffer(info);
-            buffer->reportedAllocationBytes = bufferAllocationPadding == UINT64_MAX ? 0 : info.size + bufferAllocationPadding;
-            result                          = buffer;
+            TestBuffer* buffer = ZEN_NEW() TestBuffer(info);
+            buffer->reportedAllocationBytes =
+                bufferAllocationPadding == UINT64_MAX && bufferAllocationAlignment == 1 ? 0 : GetBufferAllocationSize(info);
+            result         = buffer;
 
-            lastBufferInfo                  = info;
+            lastBufferInfo = info;
 
-            lastBufferId                    = result->GetStableId();
+            createdBufferInfos.push_back(info);
+
+            lastBufferId = result->GetStableId();
         }
 
         return result;
@@ -1635,7 +1660,28 @@ void RendererServer::Destroy()
 RenderScene::RenderScene(RenderDevice* device, const SceneData& data) :
     m_pRenderDevice(device), m_pScene(data.pScene), m_pCamera(data.pCamera)
 {
-    m_voxelBounds = m_pScene->GetAABB();
+    m_voxelBounds            = m_pScene->GetAABB();
+
+    m_instanceTriangleRanges = sceneInputs.triangleRanges;
+    m_nodesData.resize(m_instanceTriangleRanges.size());
+    for (size_t index = 0; index < m_instanceTriangleRanges.size(); ++index)
+    {
+        m_voxelTriangleCount           += m_instanceTriangleRanges[index].triangleCount;
+        m_nodesData[index].modelMatrix  = Mat4(1);
+    }
+    m_pVoxelTriangleBuffer = m_voxelTriangleCount == 0 ? nullptr : sceneInputs.indices;
+
+    if (!sceneInputs.materialsData.empty())
+    {
+        m_vertices      = sceneInputs.cpuVertices;
+        m_indices       = sceneInputs.cpuIndices;
+        m_materialsData = sceneInputs.materialsData;
+        m_nodesData.resize(m_pScene->GetRenderableCount());
+        for (const sg::Node* node : m_pScene->GetRenderableNodes())
+        {
+            m_nodesData[node->GetRenderableIndex()] = node->GetData();
+        }
+    }
 
     PrepareBuffers();
 

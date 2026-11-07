@@ -257,6 +257,47 @@ TEST_P(VulkanPresentationReviewTest, InitialZeroExtentViewportRecoversWithoutRes
     EXPECT_TRUE(device->PollFrameSubmissions(true));
 }
 
+TEST_P(VulkanPresentationReviewTest, BufferAllocationQueryMatchesNativePaddingWithoutAllocatingMemory)
+{
+    const uint64_t sizes[] = {1, 65, 4097, 65537};
+    for (uint32_t usageCase = 0; usageCase < 3; ++usageCase)
+    {
+        SCOPED_TRACE(usageCase);
+        for (uint64_t size : sizes)
+        {
+            SCOPED_TRACE(size);
+            RHIBufferCreateInfo info;
+            info.size         = size;
+            info.allocateType = usageCase == 2 ? RHIBufferAllocateType::eCPURead : RHIBufferAllocateType::eGPU;
+            if (usageCase == 2)
+            {
+                info.usageFlags.SetFlag(RHIBufferUsageFlagBits::eTransferDstBuffer);
+            }
+            else
+            {
+                info.usageFlags.SetFlags(RHIBufferUsageFlagBits::eStorageBuffer, RHIBufferUsageFlagBits::eIndirectBuffer);
+                if (usageCase == 1)
+                {
+                    info.usageFlags.SetFlags(RHIBufferUsageFlagBits::eTransferSrcBuffer,
+                                             RHIBufferUsageFlagBits::eTransferDstBuffer);
+                }
+            }
+            const RHIGPUMemoryStats before   = device->GetGPUMemoryStats();
+            const uint64_t          required = device->GetBufferAllocationSize(info);
+            const RHIGPUMemoryStats after    = device->GetGPUMemoryStats();
+            EXPECT_GE(required, size);
+            EXPECT_EQ(after.committedBytes, before.committedBytes);
+            EXPECT_EQ(after.deviceLocalBytes, before.deviceLocalBytes);
+            RHIBuffer* buffer = device->CreateBuffer(info);
+            ASSERT_NE(buffer, nullptr);
+            EXPECT_EQ(required, buffer->GetAllocationSize());
+            device->DestroyBuffer(buffer);
+        }
+    }
+    RHIBufferCreateInfo invalid;
+    EXPECT_EQ(device->GetBufferAllocationSize(invalid), 0u);
+}
+
 TEST_P(VulkanPresentationReviewTest, RendererInitializationWarmsRegisteredComputeKeysForLaterReuse)
 {
     ShaderProgramManager& programs = ShaderProgramManager::GetInstance();
