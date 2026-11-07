@@ -76,6 +76,51 @@ void ReadSceneCullCommands(RenderGraph& graph, RDGBuffer arguments, uint32_t cou
         .NeverCull();
 }
 
+constexpr uint32_t SceneCullCaptureBytes = 129 * 97 * 8 * sizeof(glm::uvec4);
+
+bool CreateSceneCullTargets(RenderDevice* device, HeapVector<RHITexture*>& textures, RHITexture* (&targets)[8])
+{
+    const DataFormat formats[] = {DataFormat::eR16G16UNORM,        DataFormat::eR8G8B8A8UNORM, DataFormat::eR8G8B8A8UNORM,
+                                  DataFormat::eR16G16B16A16SFloat, DataFormat::eR32G32UInt,    DataFormat::eR32G32B32A32SFloat,
+                                  DataFormat::eR32G32B32A32SFloat, DataFormat::eD32SFloat};
+    bool             created   = true;
+    for (uint32_t index = 0; index < 8; ++index)
+    {
+        rc::TextureFormat format;
+        format.width   = 129;
+        format.height  = 97;
+        format.depth   = 1;
+        format.format  = formats[index];
+        targets[index] = index == 7 ? device->CreateTextureDepthStencilRT(format, {}, "CullTestDepth")
+                                    : device->CreateTextureColorRT(format, {.copyUsage = true},
+                                                                   NameID(fmt::format("CullTestColor{}", index)));
+        created        = created && targets[index] != nullptr;
+        textures.push_back(targets[index]);
+    }
+    return created;
+}
+
+class ScopedSceneCullingBatchLimits
+{
+public:
+    ScopedSceneCullingBatchLimits(const RHIGPUInfo& info, bool multiDraw) :
+        m_info(const_cast<RHIGPUInfo&>(info)), m_multiDraw(info.supportMultiDrawIndirect), m_count(info.maxDrawIndirectCount)
+    {
+        m_info.supportMultiDrawIndirect = m_multiDraw && multiDraw;
+        m_info.maxDrawIndirectCount     = std::min(m_count, 2u);
+    }
+    ~ScopedSceneCullingBatchLimits()
+    {
+        m_info.supportMultiDrawIndirect = m_multiDraw;
+        m_info.maxDrawIndirectCount     = m_count;
+    }
+
+private:
+    RHIGPUInfo& m_info;
+    bool        m_multiDraw;
+    uint32_t    m_count;
+};
+
 TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybridReceivers)
 {
     ShaderProgramManager::GetInstance().StoreProgram(
@@ -94,7 +139,9 @@ TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybr
         vertex.tangent = Vec4(1, 0, 0, 1);
         vertex.color   = Vec4(1);
     }
-    HeapVector<uint32_t> indices;
+    HeapVector<uint32_t>      indices;
+    const uint32_t            materialForInstance[] = {4, 1, 2, 5, 0, 3, 2, 5, 0, 3, 4, 1, 12, 13, 14};
+    HeapVector<sg::Material*> fixtureMaterials;
     for (uint32_t index = 0; index < 15; ++index)
     {
         UniquePtr<sg::Material> material    = MakeUnique<sg::Material>("culling fixture");
@@ -102,8 +149,17 @@ TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybr
         material->data.baseColorFactor      = Vec4(float(index + 1) / 16, .25f, .5f, index == 13 ? 0.0f : 1.0f);
         material->data.surfaceProperties.y  = index % 2 != 0 ? static_cast<float>(sg::AlphaMode::Mask) : 0.0f;
         material->data.materialProperties.z = index % 3 == 0 ? 1.0f : 0.0f;
-        UniquePtr<sg::SubMesh> primitive    = MakeUnique<sg::SubMesh>("culling triangle", 3 * index, 3, 3);
-        primitive->SetMaterial(index, material.Get());
+        material->data.metallicFactor       = float(index % 4) / 4;
+        material->data.roughnessFactor      = .2f + .05f * index;
+        material->data.emissiveFactor       = Vec4(.02f * index, .01f, 0, 0);
+        fixtureMaterials.push_back(material.Get());
+        source.AddComponent(std::move(material));
+    }
+    for (uint32_t index = 0; index < 15; ++index)
+    {
+        UniquePtr<sg::SubMesh> primitive = MakeUnique<sg::SubMesh>("culling triangle", 3 * index, 3, 3);
+        const uint32_t         material  = materialForInstance[index];
+        primitive->SetMaterial(material, fixtureMaterials[material]);
         UniquePtr<sg::Mesh> mesh = MakeUnique<sg::Mesh>("culling mesh");
         mesh->AddSubMesh(primitive.Get());
         mesh->SetAABB(Vec3(-.4f, -.35f, 0), Vec3(.4f, .4f, 0));
@@ -120,7 +176,6 @@ TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybr
         nodes.push_back(std::move(node));
         source.AddComponent(std::move(mesh));
         source.AddComponent(std::move(primitive));
-        source.AddComponent(std::move(material));
         indices.push_back(0);
         indices.push_back(1);
         indices.push_back(2);
@@ -139,28 +194,12 @@ TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybr
     scene.PrepareBuffers();
     ASSERT_TRUE(scene.SetInstanceEnabled(14, false));
     ASSERT_TRUE(scene.CommitGeometryUpdates());
-    const DataFormat formats[] = {DataFormat::eR16G16UNORM,        DataFormat::eR8G8B8A8UNORM, DataFormat::eR8G8B8A8UNORM,
-                                  DataFormat::eR16G16B16A16SFloat, DataFormat::eR32G32UInt,    DataFormat::eR32G32B32A32SFloat,
-                                  DataFormat::eR32G32B32A32SFloat, DataFormat::eD32SFloat};
-    RHITexture*      targets[8]{};
-    for (uint32_t index = 0; index < 8; ++index)
-    {
-        rc::TextureFormat format;
-        format.width   = 129;
-        format.height  = 97;
-        format.depth   = 1;
-        format.format  = formats[index];
-        targets[index] = index == 7 ? device->CreateTextureDepthStencilRT(format, {}, "CullTestDepth")
-                                    : device->CreateTextureColorRT(format, {.copyUsage = true},
-                                                                   NameID(fmt::format("CullTestColor{}", index)));
-        ASSERT_NE(targets[index], nullptr);
-        textures.push_back(targets[index]);
-    }
+    RHITexture* targets[8]{};
+    ASSERT_TRUE(CreateSceneCullTargets(device, textures, targets));
     RHISampler* sampler = device->CreateSampler({});
     ASSERT_NE(sampler, nullptr);
-    const uint32_t captureBytes = 129 * 97 * 8 * sizeof(glm::uvec4);
-    RHIBuffer*     packed       = Buffer(captureBytes, RHIBufferAllocateType::eGPU);
-    RHIBuffer*     readback     = Buffer(captureBytes, RHIBufferAllocateType::eCPURead);
+    RHIBuffer* packed   = Buffer(SceneCullCaptureBytes, RHIBufferAllocateType::eGPU);
+    RHIBuffer* readback = Buffer(SceneCullCaptureBytes, RHIBufferAllocateType::eCPURead);
     ASSERT_NE(packed, nullptr);
     ASSERT_NE(readback, nullptr);
     SceneCullingDrawCache drawData;
@@ -182,8 +221,9 @@ TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybr
             ASSERT_TRUE(scene.CommitGeometryUpdates());
         }
         HeapVector<glm::uvec4> reference;
-        for (uint32_t indirect = 0; indirect < 3; ++indirect)
+        for (uint32_t indirect = 0; indirect < 4; ++indirect)
         {
+            SCOPED_TRACE(indirect);
             RenderGraph graph("SceneCullingRasterParity");
             ASSERT_TRUE(graph.Begin());
             RDGGraphicsPassDesc pass = SceneCullRasterPass(scene, sampler, targets, hybrid != 0);
@@ -199,7 +239,8 @@ TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybr
             SceneCullingResult      culling;
             if (indirect != 0)
             {
-                RDGBuffer arguments;
+                ScopedSceneCullingBatchLimits limits(device->GetGPUInfo(), indirect != 3);
+                RDGBuffer                     arguments;
                 culling =
                     AddCulledGBufferPass(*device, drawData, graph, pass, scene, selectedReceiver, indirect == 2, &arguments);
                 ASSERT_EQ(culling.status, SceneCullingStatus::eCulled);
@@ -222,6 +263,20 @@ TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybr
                 for (uint32_t index = 0; index < culling.candidateCount; ++index)
                 {
                     const uint32_t instance = drawData.contents[index].indices.x;
+                    ASSERT_LT(instance, 15u);
+                    EXPECT_EQ(drawData.contents[index].geometry.y, 3 * instance);
+                    const sg::AABB bounds = scene.GetSubMeshWorldBounds(instance, 0);
+                    EXPECT_EQ(drawData.contents[index].boundsMin, Vec4(bounds.GetMin(), 0));
+                    EXPECT_EQ(drawData.contents[index].boundsMax, Vec4(bounds.GetMax(), 0));
+                    if (hybrid != 0)
+                    {
+                        EXPECT_EQ(drawData.previousModelContents[index],
+                                  receiver.ReceiverDraw(instance, materialForInstance[instance]).previousModel);
+                    }
+                    if (indirect == 2)
+                    {
+                        EXPECT_EQ(instance, index);
+                    }
                     EXPECT_EQ(commands[index].firstInstance, index);
                     EXPECT_EQ(commands[index].instanceCount, instance == 12 ? 0u : 1u) << "instance=" << instance;
                 }
@@ -229,7 +284,8 @@ TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybr
             const HeapVector<glm::uvec4> pixels        = ReadStaticBuffer<glm::uvec4>(readback);
             uint32_t                     visiblePixels = 0;
             uint32_t                     movingPixels  = 0;
-            uint32_t                     colors[12]{};
+            uint32_t                     colors[6]{};
+            uint32_t                     visibleInstances[12]{};
             for (uint32_t index = 0; index < pixels.size(); index += 8)
             {
                 const Vec4 albedo = glm::uintBitsToFloat(pixels[index + 1]);
@@ -238,15 +294,19 @@ TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybr
                     ++visiblePixels;
                     const int colorIndex = static_cast<int>(std::round(albedo.x * 16)) - 1;
                     EXPECT_GE(colorIndex, 0);
-                    EXPECT_LT(colorIndex, 12);
-                    if (colorIndex >= 0 && colorIndex < 12)
+                    EXPECT_LT(colorIndex, 6);
+                    if (colorIndex >= 0 && colorIndex < 6)
                     {
                         ++colors[colorIndex];
                         if (hybrid != 0)
                         {
-                            EXPECT_EQ(pixels[index + 4].y / 2, static_cast<uint32_t>(colorIndex + 1));
+                            const uint32_t receiverIndex = pixels[index + 4].y / 2;
+                            ASSERT_GE(receiverIndex, 1u);
+                            ASSERT_LE(receiverIndex, 12u);
+                            ++visibleInstances[receiverIndex - 1];
+                            EXPECT_EQ(materialForInstance[receiverIndex - 1], static_cast<uint32_t>(colorIndex));
                             const Vec4 motion = glm::uintBitsToFloat(pixels[index + 5]);
-                            if (colorIndex == 0 && std::abs(motion.x) > .001f)
+                            if (receiverIndex == 1 && std::abs(motion.x) > .001f)
                             {
                                 ++movingPixels;
                             }
@@ -259,9 +319,16 @@ TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybr
             {
                 EXPECT_GT(movingPixels, 0u);
             }
-            for (uint32_t index = 0; index < 12; ++index)
+            for (uint32_t index = 0; index < 6; ++index)
             {
-                EXPECT_GT(colors[index], 0u) << "missing material/instance " << index;
+                EXPECT_GT(colors[index], 0u) << "missing material " << index;
+            }
+            if (hybrid != 0)
+            {
+                for (uint32_t index = 0; index < 12; ++index)
+                {
+                    EXPECT_GT(visibleInstances[index], 0u) << "missing instance " << index;
+                }
             }
             if (indirect == 0)
             {
@@ -315,6 +382,22 @@ TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybr
         }
     }
     EXPECT_GT(movedVisiblePixels, 0u);
+    // A committed material change must rebuild the cached candidates and batches.
+    sg::MaterialData blended    = scene.GetMaterialsData()[2];
+    blended.surfaceProperties.y = static_cast<float>(sg::AlphaMode::Blend);
+    ASSERT_TRUE(scene.UpdateMaterial(2, blended));
+    ASSERT_TRUE(scene.CommitGeometryUpdates());
+    RenderGraph blendGraph("SceneCullingMaterialUpdate");
+    ASSERT_TRUE(blendGraph.Begin());
+    RDGGraphicsPassDesc      blendPass = SceneCullRasterPass(scene, sampler, targets, false);
+    const SceneCullingResult blend     = AddCulledGBufferPass(*device, drawData, blendGraph, blendPass, scene);
+    ASSERT_EQ(blend.status, SceneCullingStatus::eCulled);
+    EXPECT_EQ(blend.candidateCount, moved.candidateCount - 2);
+    ClearUnusedSceneCullTargets(blendGraph, targets);
+    ASSERT_TRUE(blendGraph.End());
+    ASSERT_TRUE(device->ExecuteRenderGraph(blendGraph)) << blendGraph.GetResult().message;
+    device->FlushRHIThread();
+    device->WaitForIdle();
     for (uint32_t index = 0; index < nodes.size(); ++index)
     {
         ASSERT_TRUE(scene.SetInstanceEnabled(index, false));
@@ -337,5 +420,105 @@ TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybr
         EXPECT_EQ(glm::uintBitsToFloat(emptyPixels[index + 1]).w, 0.0f);
     }
     receiver.Destroy();
+    drawData.Destroy(*device);
+}
+
+TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferKeepsFirstMaterialUseForCoplanarDraws)
+{
+    ShaderProgramManager::GetInstance().StoreProgram(
+        ZEN_NEW() ComputeFileSP(device, "SceneGBufferReadbackSP", "Tests/scene_gbuffer_readback.comp.spv"));
+    sg::Scene     source;
+    asset::Vertex vertices[3]{};
+    vertices[0].pos = Vec4(-.4f, -.35f, 0, 1);
+    vertices[1].pos = Vec4(.4f, -.35f, 0, 1);
+    vertices[2].pos = Vec4(0, .4f, 0, 1);
+    for (asset::Vertex& vertex : vertices)
+    {
+        vertex.normal  = Vec4(0, 0, 1, 0);
+        vertex.tangent = Vec4(1, 0, 0, 1);
+        vertex.color   = Vec4(1);
+    }
+    HeapVector<sg::Material*> materials;
+    for (uint32_t index = 0; index < 2; ++index)
+    {
+        UniquePtr<sg::Material> material    = MakeUnique<sg::Material>("coplanar material");
+        material->index                     = index;
+        material->data.baseColorFactor      = Vec4(float(index + 1) / 16, .25f, .5f, 1);
+        material->data.materialProperties.z = 1;
+        materials.push_back(material.Get());
+        source.AddComponent(std::move(material));
+    }
+    // With an eLess depth test the first draw wins, and the higher material index is authored first.
+    const uint32_t                  authoredMaterials[] = {1, 0};
+    HeapVector<UniquePtr<sg::Node>> nodes;
+    for (uint32_t index = 0; index < 2; ++index)
+    {
+        UniquePtr<sg::SubMesh> primitive = MakeUnique<sg::SubMesh>("coplanar triangle", 0, 3, 3);
+        primitive->SetMaterial(authoredMaterials[index], materials[authoredMaterials[index]]);
+        UniquePtr<sg::Mesh> mesh = MakeUnique<sg::Mesh>("coplanar mesh");
+        mesh->AddSubMesh(primitive.Get());
+        UniquePtr<sg::Node> node = MakeUnique<sg::Node>(index, "coplanar instance");
+        node->AddComponent(mesh.Get());
+        node->SetData(index, glm::translate(Mat4(1), Vec3(0, 0, -3)));
+        source.AddRenderableNode(node.Get());
+        nodes.push_back(std::move(node));
+        source.AddComponent(std::move(mesh));
+        source.AddComponent(std::move(primitive));
+    }
+    source.GetAABB()         = sg::AABB(Vec3(-1, -1, -3), Vec3(1, 1, -3));
+    const uint32_t indices[] = {0, 1, 2};
+    sg::Camera     camera(Vec3(0), Vec3(0, 0, -1), 129.0f / 97.0f, 70.0f, .1f, 100.0f);
+    SceneData      data{};
+    data.pScene      = &source;
+    data.pCamera     = &camera;
+    data.pVertices   = vertices;
+    data.pIndices    = indices;
+    data.numVertices = 3;
+    data.numIndices  = 3;
+    RenderScene scene(device, data);
+    scene.LoadSceneMaterials();
+    scene.PrepareBuffers();
+    RHITexture* targets[8]{};
+    ASSERT_TRUE(CreateSceneCullTargets(device, textures, targets));
+    RHISampler* sampler = device->CreateSampler({});
+    ASSERT_NE(sampler, nullptr);
+    RHIBuffer* packed   = Buffer(SceneCullCaptureBytes, RHIBufferAllocateType::eGPU);
+    RHIBuffer* readback = Buffer(SceneCullCaptureBytes, RHIBufferAllocateType::eCPURead);
+    ASSERT_NE(packed, nullptr);
+    ASSERT_NE(readback, nullptr);
+    SceneCullingDrawCache drawData;
+    for (uint32_t indirect = 0; indirect < 2; ++indirect)
+    {
+        SCOPED_TRACE(indirect);
+        RenderGraph graph("SceneCullingCoplanarOrder");
+        ASSERT_TRUE(graph.Begin());
+        RDGGraphicsPassDesc pass = SceneCullRasterPass(scene, sampler, targets, false);
+        ClearUnusedSceneCullTargets(graph, targets);
+        if (indirect != 0)
+        {
+            ASSERT_EQ(AddCulledGBufferPass(*device, drawData, graph, pass, scene).status, SceneCullingStatus::eCulled);
+        }
+        else
+        {
+            AddGBufferPass(graph, std::move(pass), scene);
+        }
+        ReadSceneCullRasterTargets(graph, sampler, targets, packed, readback);
+        ASSERT_TRUE(graph.End());
+        ASSERT_TRUE(device->ExecuteRenderGraph(graph)) << graph.GetResult().message;
+        device->FlushRHIThread();
+        device->WaitForIdle();
+        const HeapVector<glm::uvec4> pixels        = ReadStaticBuffer<glm::uvec4>(readback);
+        uint32_t                     visiblePixels = 0;
+        for (uint32_t index = 0; index < pixels.size(); index += 8)
+        {
+            const Vec4 albedo = glm::uintBitsToFloat(pixels[index + 1]);
+            if (albedo.w > 0)
+            {
+                ++visiblePixels;
+                EXPECT_EQ(static_cast<uint32_t>(std::round(albedo.x * 16)), authoredMaterials[0] + 1);
+            }
+        }
+        EXPECT_GT(visiblePixels, 100u);
+    }
     drawData.Destroy(*device);
 }

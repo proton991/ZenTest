@@ -568,12 +568,17 @@ public:
     std::vector<RHIBuffer*>                         indirectDraws;
     struct IndirectDrawCall
     {
-        RHIBuffer* buffer;
-        uint64_t   offset;
-        uint32_t   count;
-        uint32_t   stride;
+        RHIBuffer*   buffer;
+        uint64_t     offset;
+        uint32_t     count;
+        uint32_t     stride;
+        RHIPipeline* pipeline;
+        uint32_t     material;
+        uint32_t     pushSize;
+        uint32_t     pushOffset;
     };
     HeapVector<IndirectDrawCall>                  indirectDrawCalls;
+    uint32_t                                      lastPushOffset{0};
     std::vector<RHIBuffer*>                       indirectDispatches;
     HeapVector<RHIShader*>                        indirectShaders;
     uint32_t                                      drawCount{0};
@@ -687,7 +692,14 @@ public:
                                 uint32_t   stride) override
     {
         indirectDraws.push_back(pIndirectBuffer);
-        indirectDrawCalls.push_back({pIndirectBuffer, offset, drawCount, stride});
+        uint32_t       material = UINT32_MAX;
+        const uint32_t pushSize = pushConstants.empty() ? 0 : static_cast<uint32_t>(pushConstants.back().size());
+        if (pushSize >= sizeof(material))
+        {
+            std::memcpy(&material, pushConstants.back().data(), sizeof(material));
+        }
+        indirectDrawCalls.push_back(
+            {pIndirectBuffer, offset, drawCount, stride, boundPipeline, material, pushSize, lastPushOffset});
     }
 
     void RHIDispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override
@@ -707,6 +719,7 @@ public:
     void RHISetPushConstants(RHIPipeline* pPipeline, VectorView<const uint8_t> data, uint32_t offset = 0) override
     {
         pushConstants.emplace_back(data.begin(), data.end());
+        lastPushOffset = offset;
         pushConstantPipelines.push_back(pPipeline);
     }
 

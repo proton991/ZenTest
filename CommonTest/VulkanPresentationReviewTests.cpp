@@ -320,7 +320,7 @@ private:
     uint32_t    m_fragment;
 };
 
-TEST_P(VulkanPresentationReviewTest, LowReportedVaryingLimitsSkipIndirectGBufferShaderRegistration)
+TEST_P(VulkanPresentationReviewTest, LowReportedVaryingLimitsSkipOnlyHybridIndirectShaderRegistration)
 {
     // Change the engine's reported limits, leaving the physical device and its shader
     // validation intact. Unsupported programs must be absent before module creation.
@@ -330,20 +330,20 @@ TEST_P(VulkanPresentationReviewTest, LowReportedVaryingLimitsSkipIndirectGBuffer
     {
         SCOPED_TRACE(vertexLimit);
         ScopedReportedVaryingLimits limits(reported, vertexLimit);
-        EXPECT_FALSE(SupportsIndirectGBufferShaders(reported));
+        EXPECT_FALSE(SupportsHybridGBufferCulling(reported));
         programs.BuildShaderPrograms(device.Get());
         const HashMap<NameID, ShaderProgram*>& registered = programs.GetPrograms();
-        for (NameID name : {NameID("GBufferIndirectSP"), NameID("GBufferMaskedIndirectSP"), NameID("HybridReceiverIndirectSP"),
-                            NameID("HybridReceiverMaskedIndirectSP"), NameID("SceneFrustumCullSP")})
+        for (NameID name : {NameID("HybridReceiverIndirectSP"), NameID("HybridReceiverMaskedIndirectSP")})
         {
             EXPECT_EQ(registered.find(name), registered.end()) << name.CStr();
         }
-        for (NameID name : {NameID("GBufferSP"), NameID("GBufferMaskedSP")})
+        const bool culling = SupportsGBufferCulling(reported);
+        for (NameID name : {NameID("GBufferIndirectSP"), NameID("GBufferMaskedIndirectSP"), NameID("SceneFrustumCullSP")})
         {
-            EXPECT_NE(registered.find(name), registered.end()) << name.CStr();
+            EXPECT_EQ(registered.find(name) != registered.end(), culling) << name.CStr();
         }
         const HeapVector<NameID>& warmups = programs.GetInitializationWarmups();
-        EXPECT_EQ(std::find(warmups.begin(), warmups.end(), NameID("SceneFrustumCullSP")), warmups.end());
+        EXPECT_EQ(std::find(warmups.begin(), warmups.end(), NameID("SceneFrustumCullSP")) != warmups.end(), culling);
         programs.Destroy();
     }
 }
