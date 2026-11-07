@@ -215,7 +215,7 @@ TEST_F(LightingBackendControlsTest, ComputeListsEveryPassWithItsTracer)
     EXPECT_EQ(text.find("HW RT is"), std::string::npos);
 }
 
-// Compute GI preparation is reported over the scene view, not in the panel.
+// Compute GI preparation is reported above the scene view, not in the panel.
 TEST_F(LightingBackendControlsTest, ComputePreparationIsLeftToTheSceneView)
 {
     rc::VoxelGISettings settings;
@@ -231,43 +231,14 @@ TEST_F(LightingBackendControlsTest, ComputePreparationIsLeftToTheSceneView)
     EXPECT_EQ(text.find("field_preparing"), std::string::npos);
 }
 
-TEST_F(LightingBackendControlsTest, PreparationStatusDrawsAtTheTopCenterClearOfCornerWidgets)
+TEST_F(LightingBackendControlsTest, SceneStatusDistinguishesPreparationRefinementAndReadiness)
 {
-    EXPECT_EQ(GetGIPreparationStatus(false, true), nullptr);
-    EXPECT_STREQ(GetGIPreparationStatus(true, true), "Preparing Compute GI. HW RT stays active until it is ready.");
-    EXPECT_STREQ(GetGIPreparationStatus(true, false), "GI preview active. Refining lighting in the background.");
-
-    ImGui::NewFrame();
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImVec2(900, 1400));
-    ImGui::Begin("Scene view test");
-    ImDrawList&     draw = *ImGui::GetWindowDrawList();
-    const ImVec2    viewMin(100, 50);
-    const ImVec2    viewMax(800, 450);
-    constexpr float inset = 120.0f;
-    int             first = draw.VtxBuffer.Size;
-    EXPECT_TRUE(DrawGIPreparationStatus(draw, true, false, viewMin, viewMax, inset));
-    ASSERT_GT(draw.VtxBuffer.Size, first);
-    ImVec2 low(FLT_MAX, FLT_MAX);
-    ImVec2 high(-FLT_MAX, -FLT_MAX);
-    for (int vertex = first; vertex < draw.VtxBuffer.Size; ++vertex)
-    {
-        low  = ImVec2(std::min(low.x, draw.VtxBuffer[vertex].pos.x), std::min(low.y, draw.VtxBuffer[vertex].pos.y));
-        high = ImVec2(std::max(high.x, draw.VtxBuffer[vertex].pos.x), std::max(high.y, draw.VtxBuffer[vertex].pos.y));
-    }
-    EXPECT_GE(low.x, viewMin.x + inset);
-    EXPECT_LE(high.x, viewMax.x - inset);
-    EXPECT_NEAR((low.x + high.x) * 0.5f, (viewMin.x + viewMax.x) * 0.5f, 1.0f);
-    EXPECT_GT(low.y, viewMin.y);
-    EXPECT_LT(high.y, (viewMin.y + viewMax.y) * 0.5f);
-
-    first = draw.VtxBuffer.Size;
-    EXPECT_FALSE(DrawGIPreparationStatus(draw, false, false, viewMin, viewMax, inset));
-    // A view too narrow beside its corner widgets keeps its scene clear.
-    EXPECT_FALSE(DrawGIPreparationStatus(draw, true, true, viewMin, ImVec2(viewMin.x + 2 * inset + 40, viewMax.y), inset));
-    EXPECT_EQ(draw.VtxBuffer.Size, first);
-    ImGui::End();
-    ImGui::Render();
+    EXPECT_EQ(GetGILightingStatus(GILightingState::Inactive, true), nullptr);
+    EXPECT_STREQ(GetGILightingStatus(GILightingState::Preparing, true), "GI active (HW RT). Preparing Compute GI...");
+    EXPECT_STREQ(GetGILightingStatus(GILightingState::Preparing, false), "Preparing GI...");
+    EXPECT_STREQ(GetGILightingStatus(GILightingState::Refining, false), "GI active. Refining lighting...");
+    EXPECT_STREQ(GetGILightingStatus(GILightingState::Ready, false), "GI ready");
+    EXPECT_STREQ(GetGILightingStatus(GILightingState::Unavailable, false), "GI unavailable. Check Rendering for details.");
 }
 
 TEST_F(LightingBackendControlsTest, HardwareReportsWhetherItIsActive)

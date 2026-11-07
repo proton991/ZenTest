@@ -1332,6 +1332,8 @@ TEST_P(EditorRendering, DiscardedCandidatePreservesUnrenderedEnvironmentWork)
 
         // The current scene has not rendered yet, as when its viewport is hidden.
         ASSERT_TRUE(editor.GetViewport().PrepareScene(*candidate, error));
+        EXPECT_TRUE(candidate->vertices.empty());
+        EXPECT_TRUE(candidate->indices.empty());
 
         if (renderBeforeDiscard)
         {
@@ -2688,7 +2690,7 @@ TEST_P(EditorRendering, LightingBackendsSwitchIndependently)
         // Compute direct shadows use maps.
         EXPECT_EQ(gi.UsesRayShadows(), gi.UsesHardwareShadows());
         EXPECT_TRUE(gi.UsesReflections());
-        // Hardware frames keep the prepared field current for a later Compute selection.
+        // Hardware frames retain a prepared field for a later Compute selection.
         EXPECT_EQ(gi.UsesFieldTraversal(), !hardware || frame != featureCount + 1);
         ASSERT_NE(gi.GetDistanceField(), nullptr);
         EXPECT_EQ(gi.GetDistanceField()->GetState(), rc::DistanceFieldScene::State::Ready);
@@ -2921,9 +2923,10 @@ TEST_P(EditorRendering, ColdHardwareToComputeSwitchKeepsRenderingUntilReady)
         rc::VoxelGIRenderer& gi = *device->GetRendererServer()->RequestVoxelGI();
         ASSERT_NE(gi.GetHardwareFeatureMask(), 0u);
         ASSERT_TRUE(gi.UsesHardwareShadows());
-        // HW RT needs no field, but the scene's field is prepared in the background meanwhile.
+        // Hardware-only startup allocates no unused Compute field or build workspace.
         ASSERT_FALSE(gi.IsPreparingField());
-        ASSERT_NE(gi.GetDistanceField(), nullptr);
+        ASSERT_FALSE(gi.IsRefiningField());
+        ASSERT_EQ(gi.GetDistanceField(), nullptr);
 
         std::ofstream csv;
         ASSERT_TRUE(OpenGITimingCsv(csv, GetParam()));

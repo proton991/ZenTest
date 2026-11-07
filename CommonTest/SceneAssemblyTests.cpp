@@ -288,6 +288,55 @@ TEST_F(SceneAssemblyTest, SharesRepeatedGeometryAndRemapsMixedMaterialAndUVTable
     EXPECT_EQ(loaded.scene->normalizationScale, 1.0f / 16);
 }
 
+TEST_F(SceneAssemblyTest, LargerGeometryLoadsFirstWithoutChangingResourceOrInstanceOrder)
+{
+    ASSERT_NO_FATAL_FAILURE(WriteModels(true));
+    zenasset::Scene second                    = AssemblyTriangle("second", false, true);
+    second.indices                            = {0, 1, 2, 0, 1, 2};
+    second.meshes[0].primitives[0].indexCount = 6;
+    ASSERT_NO_FATAL_FAILURE(StoreModel(1, second));
+    ASSERT_NO_FATAL_FAILURE(WriteAssembly());
+
+    const asset::SceneLoadResult loaded = asset::LoadScene(path.string());
+    ASSERT_TRUE(loaded.scene) << loaded.error;
+    ASSERT_TRUE(loaded.asset);
+    const asset::SceneAsset& canonical = *loaded.asset;
+    ASSERT_EQ(canonical.meshes.size(), 2u);
+    const asset::MeshPrimitiveAsset& firstPrimitive  = canonical.meshes[0].primitives[0];
+    const asset::MeshPrimitiveAsset& secondPrimitive = canonical.meshes[1].primitives[0];
+    EXPECT_EQ(firstPrimitive.firstVertex, 3u);
+    EXPECT_EQ(firstPrimitive.firstIndex, 6u);
+    EXPECT_EQ(secondPrimitive.firstVertex, 0u);
+    EXPECT_EQ(secondPrimitive.firstIndex, 0u);
+    for (uint32_t model = 0; model < 2; ++model)
+    {
+        const asset::MeshPrimitiveAsset& primitive = canonical.meshes[model].primitives[0];
+        EXPECT_EQ(primitive.material.value, model);
+        EXPECT_EQ(canonical.materials[model].m_pBaseColorTexture.value, 2 * model);
+        EXPECT_EQ(canonical.textures[2 * model].image.value, model);
+        EXPECT_EQ(canonical.morphPrimitives[model].mesh, model);
+        EXPECT_EQ(canonical.extraVertexAttributes[model].mesh, model);
+        EXPECT_EQ(canonical.variantPrimitives[model].mesh, model);
+        for (uint32_t index = 0; index < primitive.indexCount; ++index)
+        {
+            EXPECT_EQ(canonical.indices[primitive.firstIndex + index], primitive.firstVertex + index % 3);
+        }
+    }
+    EXPECT_EQ(canonical.vertexTexCoords[firstPrimitive.firstVertex][0], Vec2(.2f));
+    EXPECT_EQ(canonical.vertexTexCoords[firstPrimitive.firstVertex][2], Vec2(.7f));
+    EXPECT_EQ(canonical.vertexTexCoords[secondPrimitive.firstVertex][1], Vec2(.4f));
+    ASSERT_EQ(canonical.roots.size(), 3u);
+    EXPECT_EQ(canonical.nodes[canonical.roots[0].value].name, "one");
+    EXPECT_EQ(canonical.nodes[canonical.roots[1].value].name, "two");
+    EXPECT_EQ(canonical.nodes[canonical.roots[2].value].name, "three");
+    EXPECT_EQ(canonical.nodes[canonical.roots[0].value + 1].mesh.value, 0u);
+    EXPECT_EQ(canonical.nodes[canonical.roots[1].value + 1].mesh.value, 1u);
+    EXPECT_EQ(canonical.nodes[canonical.roots[2].value + 1].mesh.value, 0u);
+    EXPECT_EQ(loaded.scene->scene->GetRenderableCount(), 3u);
+    EXPECT_EQ(canonical.preferredCameraNode, static_cast<int32_t>(canonical.roots[1].value + 2));
+    EXPECT_EQ(canonical.imageBasedLight, 1);
+}
+
 TEST_F(SceneAssemblyTest, StaticModelKeepsItsCoordinatesInVertexStreamsAndPublishesBuildDiagnostics)
 {
     zenasset::SceneWriteOptions options;
@@ -314,6 +363,68 @@ TEST_F(SceneAssemblyTest, StaticModelKeepsItsCoordinatesInVertexStreamsAndPublis
     EXPECT_TRUE(data.vertexTexCoords.empty());
     ASSERT_EQ(loaded.scene->vertices.size(), 3u);
     EXPECT_EQ(loaded.scene->vertices[0].uv0, Vec2(.4f));
+}
+
+TEST_F(SceneAssemblyTest, UninstantiatedSkinnedNodeKeepsAStaticTransferWithoutCoordinateRows)
+{
+    zenasset::Scene model = AssemblyTriangle("first", false);
+    // The skinned definition is outside the selected scene, so no instance deforms.
+    model.nodes[2].mesh = zenasset::MeshId{0};
+    model.nodes[2].skin = zenasset::SkinId{0};
+    model.skins.push_back({"skin-first", 1, {1}, {zenasset::Mat4(1)}});
+    model.meshes[0].primitives[0].influences.resize(3, {{0, 1}});
+    ASSERT_NO_FATAL_FAILURE(StoreModel(0, model));
+    assembly.instances.push_back({"one", "first"});
+    ASSERT_NO_FATAL_FAILURE(WriteAssembly());
+    asset::SceneImportRequest request{path.string()};
+    request.retainCanonicalAsset        = false;
+    const asset::SceneLoadResult loaded = asset::LoadScene(request);
+    ASSERT_TRUE(loaded.scene) << loaded.error;
+    const sg::SceneAssetData& data = loaded.scene->scene->GetAssetData();
+    EXPECT_TRUE(data.deformations.empty());
+    EXPECT_TRUE(data.bindVertices.empty());
+    EXPECT_TRUE(data.vertexTexCoords.empty());
+    ASSERT_EQ(loaded.scene->vertices.size(), 3u);
+    EXPECT_EQ(loaded.scene->vertices[0].uv0, Vec2(.4f));
+}
+
+TEST_F(SceneAssemblyTest, RuntimeOnlyLoadsPreserveGeometryAndLeaseNativeImages)
+{
+    ASSERT_NO_FATAL_FAILURE(WriteModels());
+    const asset::SceneLoadResult reference = asset::LoadScene(path.string());
+    ASSERT_TRUE(reference.scene) << reference.error;
+    asset::SceneImportRequest request{path.string()};
+    request.retainCanonicalAsset   = false;
+    asset::SceneLoadResult runtime = asset::LoadScene(request);
+    ASSERT_TRUE(runtime.scene) << runtime.error;
+    EXPECT_FALSE(runtime.asset);
+    EXPECT_EQ(runtime.scene->vertices.size(), reference.scene->vertices.size());
+    EXPECT_EQ(runtime.scene->indices.size(), reference.scene->indices.size());
+    EXPECT_TRUE(std::equal(runtime.scene->indices.begin(), runtime.scene->indices.end(), reference.scene->indices.begin()));
+    for (size_t vertex = 0; vertex < runtime.scene->vertices.size(); ++vertex)
+    {
+        EXPECT_EQ(runtime.scene->vertices[vertex].pos, reference.scene->vertices[vertex].pos);
+        EXPECT_EQ(runtime.scene->vertices[vertex].uv0, reference.scene->vertices[vertex].uv0);
+        EXPECT_EQ(runtime.scene->vertices[vertex].uv1, reference.scene->vertices[vertex].uv1);
+    }
+    const HeapVector<sg::Texture*>& textures = runtime.scene->scene->GetComponents<sg::Texture>();
+    ASSERT_FALSE(textures.empty());
+    const SharedPtr<const asset::ImagePixels, MultiThreadCounter> descriptor = textures[0]->pixels;
+    ASSERT_TRUE(descriptor);
+    EXPECT_TRUE(descriptor->payloadSource);
+    EXPECT_TRUE(descriptor->bytes.empty());
+    runtime.scene.Reset();
+    SharedPtr<const asset::ImagePixels, MultiThreadCounter> lease;
+    ASSERT_TRUE(asset::ResolveImagePixels(descriptor, lease));
+    EXPECT_EQ(lease->bytes.size(), 4u);
+    EXPECT_FALSE(lease->payloadSource);
+    lease.Reset();
+    EXPECT_TRUE(descriptor->bytes.empty());
+    request.path                        = (directory / "first.zenasset").string();
+    const asset::SceneLoadResult single = asset::LoadScene(request);
+    ASSERT_TRUE(single.scene) << single.error;
+    EXPECT_FALSE(single.asset);
+    EXPECT_FALSE(single.scene->vertices.empty());
 }
 
 TEST_F(SceneAssemblyTest, PreservesAuthoredLightsAndUsesExplicitInstanceSelections)

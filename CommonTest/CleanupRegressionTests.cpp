@@ -33,6 +33,24 @@ TEST(HeapVectorRegression, AppendPreservesAliasedSourceDuringGrowth)
     EXPECT_EQ(values[5], "first");
 }
 
+TEST(HeapVectorRegression, PushBackPreservesAliasedElementDuringGrowth)
+{
+    // A full vector reallocates before appending; the argument still refers to old storage.
+    HeapVector<std::string> names(1);
+    names[0] = "a fairly long string that does not fit any small buffer";
+    ASSERT_EQ(names.size(), names.capacity());
+    names.push_back(names[0]);
+    ASSERT_EQ(names.size(), 2u);
+    EXPECT_EQ(names[1], names[0]);
+
+    HeapVector<const int*> pointers(1);
+    const int              value = 7;
+    pointers[0]                  = &value;
+    ASSERT_EQ(pointers.size(), pointers.capacity());
+    pointers.push_back(pointers[0]);
+    EXPECT_EQ(pointers[1], &value);
+}
+
 TEST(HeapVectorRegression, InsertPreservesAliasedSourceDuringGrowth)
 {
     // Growing reallocates the source range and shifting the tail moves it.

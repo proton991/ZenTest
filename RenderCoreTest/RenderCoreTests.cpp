@@ -4147,6 +4147,123 @@ TEST_F(RenderCoreTest, ProductionSceneTexturesPreserveFormatsMipsAndDistinctOwne
     }
 }
 
+TEST_F(RenderCoreTest, SharedOrdinaryImagesReuseStorageWithoutSharingColorDependentGeneratedMips)
+{
+    sg::Scene                                         scene;
+    SharedPtr<asset::ImagePixels, MultiThreadCounter> pixels = MakeShared<asset::ImagePixels, MultiThreadCounter>();
+    pixels->width = pixels->height = 2;
+    pixels->bytes.resize(16);
+    for (uint32_t index = 0; index < 3; ++index)
+    {
+        UniquePtr<sg::Texture> texture = MakeUnique<sg::Texture>("shared");
+        texture->width = texture->height = 2;
+        texture->format                  = index == 2 ? asset::Format::R8G8B8A8_SRGB : asset::Format::R8G8B8A8_UNORM;
+        texture->pixels                  = pixels;
+        scene.AddComponent(std::move(texture));
+    }
+    StagingBufferManager        staging(1024, 4096);
+    StagingUploadQueue          uploads(device, &staging);
+    TextureManager              textures(device, &uploads);
+    HeapVector<RHITextureView*> views;
+    textures.LoadSceneTextures(&scene, views);
+    ASSERT_EQ(views.size(), 3u);
+    ASSERT_NE(views[0], nullptr);
+    ASSERT_NE(views[2], nullptr);
+    EXPECT_EQ(views[0], views[1]);
+    EXPECT_NE(views[0]->GetTexture(), views[2]->GetTexture());
+    pixels->mips.push_back(pixels->bytes);
+    pixels->mips.push_back(HeapVector<uint8_t>(4));
+    pixels->bytes.clear();
+    views.clear();
+    textures.LoadSceneTextures(&scene, views);
+    ASSERT_EQ(views.size(), 3u);
+    ASSERT_NE(views[0], nullptr);
+    ASSERT_NE(views[2], nullptr);
+    EXPECT_EQ(views[0], views[1]);
+    EXPECT_EQ(views[0]->GetTexture(), views[2]->GetTexture());
+    EXPECT_NE(views[0]->GetFormat(), views[2]->GetFormat());
+    EXPECT_TRUE(views[0]->GetTexture()->GetBaseInfo().mutableFormat);
+    textures.Destroy();
+    uploads.Destroy();
+    staging.Destroy();
+}
+
+namespace
+{
+class CountingImageSource final : public asset::ImagePayloadSource
+{
+public:
+    explicit CountingImageSource(SharedPtr<const asset::ImagePixels, MultiThreadCounter> resident) :
+        m_resident(std::move(resident))
+    {}
+
+    bool Read(SharedPtr<const asset::ImagePixels, MultiThreadCounter>& pixels, std::string& error) const override
+    {
+        ++reads;
+        pixels = m_resident;
+        error.clear();
+        return true;
+    }
+
+    mutable uint32_t reads{0};
+
+private:
+    SharedPtr<const asset::ImagePixels, MultiThreadCounter> m_resident;
+};
+} // namespace
+
+TEST_F(RenderCoreTest, DeferredImagesResolveOncePerImageAndBecomeMutableOnlyForMixedViews)
+{
+    SharedPtr<asset::ImagePixels, MultiThreadCounter> resident = MakeShared<asset::ImagePixels, MultiThreadCounter>();
+    resident->width = resident->height = 2;
+    resident->mips.push_back(HeapVector<uint8_t>(16));
+    resident->mips.push_back(HeapVector<uint8_t>(4));
+    SharedPtr<CountingImageSource, MultiThreadCounter> source = MakeShared<CountingImageSource, MultiThreadCounter>(resident);
+    SharedPtr<asset::ImagePixels, MultiThreadCounter>  descriptor = MakeShared<asset::ImagePixels, MultiThreadCounter>();
+    descriptor->width = descriptor->height = 2;
+    descriptor->mips.resize(2);
+    descriptor->payloadSource                               = source;
+    SharedPtr<asset::ImagePixels, MultiThreadCounter> other = MakeShared<asset::ImagePixels, MultiThreadCounter>(*resident);
+    sg::Scene                                         scene;
+    // Another image sits between views of the deferred one; grouping must still read it once.
+    for (uint32_t index = 0; index < 4; ++index)
+    {
+        UniquePtr<sg::Texture> texture = MakeUnique<sg::Texture>("view");
+        texture->width = texture->height = 2;
+        texture->format                  = asset::Format::R8G8B8A8_UNORM;
+        texture->pixels                  = index == 1 ? other : descriptor;
+        scene.AddComponent(std::move(texture));
+    }
+    StagingBufferManager        staging(1024, 4096);
+    StagingUploadQueue          uploads(device, &staging);
+    TextureManager              textures(device, &uploads);
+    HeapVector<RHITextureView*> views;
+    textures.LoadSceneTextures(&scene, views);
+    ASSERT_EQ(views.size(), 4u);
+    for (RHITextureView* view : views)
+    {
+        ASSERT_NE(view, nullptr);
+    }
+    EXPECT_EQ(source->reads, 1u);
+    EXPECT_EQ(views[0], views[2]);
+    EXPECT_EQ(views[0], views[3]);
+    EXPECT_NE(views[0]->GetTexture(), views[1]->GetTexture());
+    // One view format needs no mutable storage.
+    EXPECT_FALSE(views[0]->GetTexture()->GetBaseInfo().mutableFormat);
+    scene.GetComponents<sg::Texture>()[3]->format = asset::Format::R8G8B8A8_SRGB;
+    views.clear();
+    textures.LoadSceneTextures(&scene, views);
+    ASSERT_EQ(views.size(), 4u);
+    ASSERT_NE(views[0], nullptr);
+    ASSERT_NE(views[3], nullptr);
+    EXPECT_EQ(source->reads, 2u);
+    EXPECT_EQ(views[0]->GetTexture(), views[3]->GetTexture());
+    EXPECT_TRUE(views[0]->GetTexture()->GetBaseInfo().mutableFormat);
+    textures.Destroy();
+    uploads.Destroy();
+    staging.Destroy();
+}
+
 TEST_F(RenderCoreEnvironmentTest, EnvironmentReplacementRetainsAndRetiresAllOutputs)
 {
     const std::filesystem::path file = std::filesystem::temp_directory_path() / "zen_phase1c_environment.dds";
@@ -9471,7 +9588,7 @@ TEST(RenderCoreSceneInputTest, BufferLimitsRejectContentBeforeAllocationOrCountN
 
     scene.GetAssetData().vertexTexCoords.resize(1);
 
-    scene.GetAssetData().vertexTexCoords[0].resize(128);
+    scene.GetAssetData().vertexTexCoords[0].resize(256);
 
     EXPECT_NE(RenderScene::GetResourceError(gpu, scene, 3, 3).find("texture coordinates"), std::string::npos);
 
@@ -9484,11 +9601,11 @@ TEST(RenderCoreSceneInputTest, BufferLimitsRejectContentBeforeAllocationOrCountN
 
     scene.GetAssetData().vertexTexCoords.resize(1);
 
-    scene.GetAssetData().vertexTexCoords[0].resize(128);
+    scene.GetAssetData().vertexTexCoords[0].resize(256);
 
     gpu.storageBufferAlignment = 4096;
 
-    const uint64_t vertices    = ((uint64_t(UINT32_MAX) - 4095) / sizeof(Vec4) - 1) / 128;
+    const uint64_t vertices    = ((uint64_t(UINT32_MAX) - 4095) / sizeof(Vec2) - 1) / 256;
 
     EXPECT_NE(RenderScene::GetResourceError(gpu, scene, vertices + 1, 3).find("texture coordinates"), std::string::npos);
 

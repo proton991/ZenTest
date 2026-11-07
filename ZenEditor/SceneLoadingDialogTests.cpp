@@ -41,19 +41,21 @@ protected:
         ImGui::DestroyContext();
     }
 
-    void DrawFrame(SceneLoadStage                 stage,
-                   asset::SceneImportStage        importStage  = asset::SceneImportStage::Queued,
-                   bool                           recook       = false,
-                   asset::SceneImportFileProgress fileProgress = {})
+    void DrawFrame(SceneLoadStage                  stage,
+                   asset::SceneImportStage         importStage   = asset::SceneImportStage::Queued,
+                   bool                            recook        = false,
+                   asset::SceneImportFileProgress  fileProgress  = {},
+                   asset::SceneImportCacheProgress cacheProgress = {})
     {
         ImGui::NewFrame();
 
         ImGui::Begin("Loading test");
 
         SceneLoadState state{stage, "example.gltf"};
-        state.importStage  = importStage;
-        state.recook       = recook;
-        state.fileProgress = fileProgress;
+        state.importStage   = importStage;
+        state.recook        = recook;
+        state.fileProgress  = fileProgress;
+        state.cacheProgress = cacheProgress;
         ImGui::LogToBuffer();
         action       = DrawSceneLoadingDialog(state, "Import failed");
         renderedText = ImGui::GetCurrentContext()->LogBuffer.c_str();
@@ -142,16 +144,33 @@ TEST_F(SceneLoadingDialog, PercentageTracksFileCountsWithinTheSameImportStage)
 
     DrawFrame(SceneLoadStage::Reading, asset::SceneImportStage::DecodingTextures, false, {299, 300, true});
     EXPECT_NE(renderedText.find("99% (299 / 300 files)"), std::string::npos) << renderedText;
+    // Every file is read but the stage continues: the bar names the remaining work, not 100%.
     DrawFrame(SceneLoadStage::Reading, asset::SceneImportStage::DecodingTextures, false, {300, 300, true});
-    EXPECT_NE(renderedText.find("100% (300 / 300 files)"), std::string::npos) << renderedText;
+    EXPECT_EQ(renderedText.find('%'), std::string::npos) << renderedText;
+    EXPECT_NE(renderedText.find("Decoding textures...", renderedText.find("Decoding textures...") + 1), std::string::npos)
+        << renderedText;
 }
 
 TEST_F(SceneLoadingDialog, DiscoveryDoesNotPresentAPercentageFromAnIncompleteTotal)
 {
     DrawFrame(SceneLoadStage::Reading);
     DrawFrame(SceneLoadStage::Reading, asset::SceneImportStage::Reading, false, {5, 10, false});
-    EXPECT_NE(renderedText.find("Discovering files..."), std::string::npos) << renderedText;
-    EXPECT_EQ(renderedText.find('%'), std::string::npos);
+    EXPECT_EQ(renderedText.find('%'), std::string::npos) << renderedText;
+    EXPECT_EQ(renderedText.find("files)"), std::string::npos) << renderedText;
+    // The status line and the indeterminate bar both name the operation.
+    EXPECT_NE(renderedText.find("Reading scene data...", renderedText.find("Reading scene data...") + 1), std::string::npos)
+        << renderedText;
+}
+
+TEST_F(SceneLoadingDialog, CacheSavingCountsPublishedResources)
+{
+    DrawFrame(SceneLoadStage::Reading);
+    DrawFrame(SceneLoadStage::Reading, asset::SceneImportStage::SavingCache, false, {3, 3, true}, {0, 0});
+    EXPECT_NE(renderedText.find("Preparing cache..."), std::string::npos) << renderedText;
+    DrawFrame(SceneLoadStage::Reading, asset::SceneImportStage::SavingCache, false, {3, 3, true}, {4, 10});
+    EXPECT_NE(renderedText.find("4 / 10 resources saved"), std::string::npos) << renderedText;
+    DrawFrame(SceneLoadStage::Reading, asset::SceneImportStage::SavingCache, false, {3, 3, true}, {10, 10});
+    EXPECT_NE(renderedText.find("Finalizing cache..."), std::string::npos) << renderedText;
 }
 } // namespace
 } // namespace zen::editor

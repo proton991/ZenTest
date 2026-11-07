@@ -500,13 +500,15 @@ TEST_F(RenderCoreTest, DistanceFieldDerivedCapacitiesFitNativeAllocationBudget)
     source.GetAABB() = sg::AABB(Vec3(-1), Vec3(1));
     ASSERT_EQ(scene.GetVoxelTriangleCount(), 25700u);
     DistanceFieldSceneSettings settings;
-    settings.cellsPerAxis          = 4;
-    settings.atlasTexelsPerAxis    = 8;
-    settings.jobCapacity           = 1;
-    settings.referenceCapacity     = 1;
-    settings.deriveCapacities      = true;
-    rhi->bufferAllocationAlignment = 256;
-    rhi->bufferAllocationPadding   = 0;
+    settings.cellsPerAxis       = 4;
+    settings.atlasTexelsPerAxis = 8;
+    settings.jobCapacity        = 1;
+    settings.referenceCapacity  = 1;
+    settings.deriveCapacities   = true;
+    // Device headroom must not replace the explicit scratch limit.
+    rhi->info.deviceLocalMemoryBytes = 8ull * 1024 * 1024 * 1024;
+    rhi->bufferAllocationAlignment   = 256;
+    rhi->bufferAllocationPadding     = 0;
     for (uint32_t scenario = 0; scenario < 3; ++scenario)
     {
         SCOPED_TRACE(scenario);
@@ -548,6 +550,78 @@ TEST_F(RenderCoreTest, DistanceFieldDerivedCapacitiesFitNativeAllocationBudget)
         device->NextFrame();
     }
     rhi->failBufferAllocationQuery = false;
+    for (RHIBuffer* buffer :
+         {sceneInputs.vertices, sceneInputs.indices, sceneInputs.nodes, sceneInputs.materials, sceneInputs.uv})
+    {
+        device->DestroyBuffer(buffer);
+    }
+    sceneInputs = {};
+}
+
+TEST_F(RenderCoreTest, DistanceFieldSuspendDropsAnUnfinishedBuildAndFreesItsScratch)
+{
+    sceneInputs.vertices  = Buffer(sizeof(asset::Vertex));
+    sceneInputs.indices   = Buffer();
+    sceneInputs.nodes     = Buffer();
+    sceneInputs.materials = Buffer();
+    sceneInputs.uv        = Buffer();
+    sceneInputs.shadowCasters.push_back({sg::AABB(Vec3(-1), Vec3(1)), 1});
+    sceneInputs.triangleRanges.push_back({0, 100, GI_STATIC, Vec4(0)});
+    EnableDistanceFieldTestDevice(device);
+    sg::Scene source;
+    source.GetAABB() = sg::AABB(Vec3(-1), Vec3(1));
+    SceneData data{};
+    data.pScene = &source;
+    RenderScene scene(device, data);
+    source.GetAABB() = sg::AABB(Vec3(-1), Vec3(1));
+    DistanceFieldSceneSettings settings;
+    settings.cellsPerAxis            = 4;
+    settings.atlasTexelsPerAxis      = 8;
+    settings.jobCapacity             = 1;
+    settings.referenceCapacity       = 1;
+    settings.deriveCapacities        = true;
+    settings.scratchBudgetBytes      = 65539;
+    rhi->info.deviceLocalMemoryBytes = 8ull * 1024 * 1024 * 1024;
+    rhi->bufferAllocationAlignment   = 256;
+    rhi->bufferAllocationPadding     = 0;
+    DistanceFieldScene field(device, settings);
+    {
+        RenderGraph& graph = *device->GetCurrentFrameRDG();
+        ASSERT_TRUE(graph.Begin());
+        ASSERT_EQ(field.BuildRenderGraph(scene), DistanceFieldScene::State::Pending) << field.GetFailureReason();
+        graph.AddComputePass(IntentPass("keepalive"));
+        ASSERT_TRUE(graph.End()) << graph.GetResult().message;
+        ASSERT_TRUE(device->ExecuteRenderGraph(graph)) << graph.GetResult().message;
+        field.OnRenderGraphExecuted(RenderFrameResult::eSubmitted);
+        device->NextFrame();
+    }
+    ASSERT_GT(field.GetScratchBytes(), 0u);
+    // HW-only frames record no field work; the dropped build's scratch retires with its GPU work.
+    for (uint32_t frame = 0; frame < 8 && field.GetScratchBytes() != 0; ++frame)
+    {
+        RenderGraph& graph = *device->GetCurrentFrameRDG();
+        ASSERT_TRUE(graph.Begin());
+        field.Suspend();
+        graph.AddComputePass(IntentPass("keepalive"));
+        ASSERT_TRUE(graph.End()) << graph.GetResult().message;
+        ASSERT_TRUE(device->ExecuteRenderGraph(graph)) << graph.GetResult().message;
+        device->NextFrame();
+    }
+    EXPECT_EQ(field.GetScratchBytes(), 0u);
+    EXPECT_EQ(field.GetState(), DistanceFieldScene::State::Pending);
+    {
+        // Selecting Compute again restarts the dropped build.
+        RenderGraph& graph = *device->GetCurrentFrameRDG();
+        ASSERT_TRUE(graph.Begin());
+        EXPECT_EQ(field.BuildRenderGraph(scene), DistanceFieldScene::State::Pending) << field.GetFailureReason();
+        EXPECT_GT(field.GetScratchBytes(), 0u);
+        graph.AddComputePass(IntentPass("keepalive"));
+        ASSERT_TRUE(graph.End()) << graph.GetResult().message;
+        ASSERT_TRUE(device->ExecuteRenderGraph(graph)) << graph.GetResult().message;
+        field.OnRenderGraphExecuted(RenderFrameResult::eSubmitted);
+        device->NextFrame();
+    }
+    field.Destroy();
     for (RHIBuffer* buffer :
          {sceneInputs.vertices, sceneInputs.indices, sceneInputs.nodes, sceneInputs.materials, sceneInputs.uv})
     {

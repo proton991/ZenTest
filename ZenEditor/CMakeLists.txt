@@ -26,6 +26,10 @@ target_compile_definitions(EditorModelTest PRIVATE ZEN_EDITOR_FIXTURES="${CMAKE_
 add_test(NAME EditorModelTest COMMAND EditorModelTest)
 set_tests_properties(EditorModelTest PROPERTIES LABELS "unit" TIMEOUT 120)
 add_executable(EditorRenderingTest EditorRenderingTests.cpp)
+add_executable(AssetPreprocessorTest AssetPreprocessorTests.cpp)
+target_link_libraries(AssetPreprocessorTest PRIVATE ZenEditorServices ZenAsset::Reader gtest_main)
+add_test(NAME AssetPreprocessorTest COMMAND AssetPreprocessorTest)
+set_tests_properties(AssetPreprocessorTest PROPERTIES LABELS "unit" TIMEOUT 90)
 target_link_libraries(EditorRenderingTest PRIVATE ZenEditorServices gtest_main)
 target_compile_definitions(EditorRenderingTest PRIVATE
   ZEN_EDITOR_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/Fixtures/"

@@ -3,6 +3,8 @@
 #include "Editor/Model/EditorPreferences.h"
 #include "Editor/Model/EditorSelection.h"
 #include "Editor/Model/ViewAxes.h"
+#include "AssetTools/SceneTools.h"
+#include "AssetLib/SceneAssetIO.h"
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <cmath>
@@ -1385,6 +1387,48 @@ TEST(EditorLog, IndependentViewCopiesOnlyNewEntriesAndKeepsClearLocal)
     ASSERT_EQ(view.size(), 2048u);
     EXPECT_EQ(view.front().text, "52");
     EXPECT_EQ(view.back().text, "2099");
+}
+TEST(EditorModel, RuntimeSourceLoadsPublishDeferredTexturesAndPreserveCachedGeometry)
+{
+    asset::SceneImportRequest request{Fixture("textured.gltf")};
+    request.cacheDirectory                = MakeSettingsDirectory("runtime-source-cache").string();
+    request.retainCanonicalAsset          = false;
+    const asset::SceneLoadResult imported = asset::LoadSourceScene(request);
+    ASSERT_TRUE(imported.scene) << imported.error;
+    EXPECT_FALSE(imported.asset);
+    EXPECT_FALSE(imported.cacheHit);
+    ASSERT_FALSE(imported.scene->vertices.empty());
+    ASSERT_FALSE(imported.scene->indices.empty());
+    const HeapVector<sg::Texture*> textures         = imported.scene->scene->GetComponents<sg::Texture>();
+    uint32_t                       deferredTextures = 0;
+    for (const sg::Texture* texture : textures)
+    {
+        if (texture->width == 4 && texture->height == 2)
+        {
+            ASSERT_TRUE(texture->pixels);
+            ASSERT_TRUE(texture->pixels->payloadSource);
+            EXPECT_TRUE(texture->pixels->bytes.empty());
+            SharedPtr<const asset::ImagePixels, MultiThreadCounter> lease;
+            ASSERT_TRUE(asset::ResolveImagePixels(texture->pixels, lease));
+            ASSERT_TRUE(lease);
+            EXPECT_EQ(lease->bytes.size(), 4u * 2u * 4u);
+            ++deferredTextures;
+        }
+    }
+    EXPECT_GT(deferredTextures, 0u);
+    EXPECT_TRUE(asset::WaitForSceneAssetCacheWrites().empty());
+    const asset::SceneLoadResult cached = asset::LoadSourceScene(request);
+    ASSERT_TRUE(cached.scene) << cached.error;
+    EXPECT_FALSE(cached.asset);
+    EXPECT_TRUE(cached.cacheHit);
+    ASSERT_EQ(cached.scene->vertices.size(), imported.scene->vertices.size());
+    ASSERT_EQ(cached.scene->indices.size(), imported.scene->indices.size());
+    EXPECT_TRUE(std::equal(cached.scene->indices.begin(), cached.scene->indices.end(), imported.scene->indices.begin()));
+    for (size_t vertex = 0; vertex < imported.scene->vertices.size(); ++vertex)
+    {
+        EXPECT_EQ(cached.scene->vertices[vertex].pos, imported.scene->vertices[vertex].pos);
+        EXPECT_EQ(cached.scene->vertices[vertex].uv0, imported.scene->vertices[vertex].uv0);
+    }
 }
 } // namespace
 } // namespace zen::editor
