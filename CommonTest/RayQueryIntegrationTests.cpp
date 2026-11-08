@@ -166,6 +166,20 @@ protected:
         EXPECT_EQ(queries, 1u);
     }
 
+    void AllocateBuildScratch(RHIAccelerationStructureBuildInfo& build)
+    {
+        const RHIAccelerationStructureBuildSizes sizes     = GDynamicRHI->GetAccelerationStructureBuildSizes(build.description);
+        const uint64_t                           alignment = device->GetGPUInfo().rayQuery.scratchAlignment;
+        BitField<RHIBufferUsageFlagBits>         usage;
+        usage.SetFlags(RHIBufferUsageFlagBits::eDeviceAddress, RHIBufferUsageFlagBits::eStorageBuffer);
+        build.pScratchBuffer =
+            Buffer(static_cast<uint32_t>(std::max(sizes.buildScratchSize, sizes.updateScratchSize) + alignment), usage);
+        if (build.pScratchBuffer != nullptr)
+        {
+            build.scratchOffset = (alignment - build.pScratchBuffer->GetDeviceAddress() % alignment) % alignment;
+        }
+    }
+
     void CheckSceneHits(RenderScene&   scene,
                         SceneRayQuery& queries,
                         float          dynamicDistance,
@@ -254,7 +268,9 @@ TEST_P(RayQueryIntegrationTest, SceneSnapshotsTrackOpacityDeformationMotionAndRe
             material->data.materialProperties.z = 1.0f;
             material->data.surfaceProperties.y  = i == 0 ? 1.0f : 0.0f;
             material->data.baseColorFactor.a    = float(i);
-            UniquePtr<sg::SubMesh> primitive    = MakeUnique<sg::SubMesh>("triangle", i * 3, 3, 3);
+            // Repeated leaf-card coverage also exercises the production micromap
+            // bake/cache path on supporting devices, through edits and retirement.
+            UniquePtr<sg::SubMesh> primitive = MakeUnique<sg::SubMesh>("triangle", i * 384, 384, 3);
             primitive->SetMaterial(i, material.Get());
             mesh->AddSubMesh(primitive.Get());
             source.AddComponent(std::move(primitive));
@@ -271,8 +287,12 @@ TEST_P(RayQueryIntegrationTest, SceneSnapshotsTrackOpacityDeformationMotionAndRe
         }
         source.SetNodes(std::move(nodes));
         source.AddComponent(std::move(mesh));
-        asset::Vertex  vertices[6]{};
-        const uint32_t indices[] = {0, 1, 2, 3, 4, 5};
+        asset::Vertex vertices[6]{};
+        uint32_t      indices[768];
+        for (uint32_t i = 0; i < 768; ++i)
+        {
+            indices[i] = (i / 384) * 3 + i % 3;
+        }
         for (uint32_t i = 0; i < 6; ++i)
         {
             vertices[i].pos    = Vec4(i % 3 == 0   ? -0.5f
@@ -288,7 +308,7 @@ TEST_P(RayQueryIntegrationTest, SceneSnapshotsTrackOpacityDeformationMotionAndRe
         data.pVertices   = vertices;
         data.numVertices = 6;
         data.pIndices    = indices;
-        data.numIndices  = 6;
+        data.numIndices  = 768;
         data.pCamera     = &camera;
         asset::PrepareScenePlacement(*data.pScene, asset::ScenePlacement::CenterAndNormalize);
         RenderScene scene(device, data);
@@ -299,12 +319,12 @@ TEST_P(RayQueryIntegrationTest, SceneSnapshotsTrackOpacityDeformationMotionAndRe
         // At alpha zero the masked primitive can never occlude and stays out of the BLAS; frame 1
         // raises its alpha past the cutoff, which adds it and rebuilds. Frame 2 makes the masked
         // material single-sided; its back face still blocks, and the BLAS is reused.
-        const float      expected[] = {1.5f, 1.0f, 1.0f, 1.25f, -1.0f, -1.0f, 1.25f, 1.25f, 1.25f, 1.25f};
-        const uint32_t   built[]    = {1, 1, 0, 0, 0, 0, 1, 0, 0, 0};
-        const uint32_t   updated[]  = {0, 0, 0, 1, 0, 0, 0, 0, 0, 0};
-        const uint32_t   reused[]   = {0, 0, 1, 0, 1, 0, 0, 1, 1, 1};
+        const float      expected[] = {1.5f, 1.0f, 1.0f, 1.25f, -1.0f, -1.0f, 1.25f, 1.25f, 1.25f, 1.25f, 1.75f, 1.25f};
+        const uint32_t   built[]    = {1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1};
+        const uint32_t   updated[]  = {0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+        const uint32_t   reused[]   = {0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0};
         sg::MaterialData material   = source.GetComponents<sg::Material>()[0]->data;
-        for (uint32_t frame = 0; frame < 10; ++frame)
+        for (uint32_t frame = 0; frame < 12; ++frame)
         {
             SCOPED_TRACE(frame);
             Vec4 queryOffset(0);
@@ -351,6 +371,16 @@ TEST_P(RayQueryIntegrationTest, SceneSnapshotsTrackOpacityDeformationMotionAndRe
                 ASSERT_TRUE(scene.SetInstanceTransform(0, glm::translate(Mat4(1), Vec3(queryOffset))));
                 ASSERT_TRUE(scene.SetInstanceTransform(1, glm::translate(Mat4(1), Vec3(queryOffset) + Vec3(2, 0, 0))));
             }
+            if (frame >= 10)
+            {
+                // Keep the primitive eligible (maximum alpha .75), but open the
+                // center of its coverage. Restoring alpha can reuse the disk bake.
+                for (uint32_t corner = 0; corner < 3; ++corner)
+                {
+                    vertices[corner].color.a = frame == 11 ? 1.0f : corner == 2 ? .75f : 0.0f;
+                }
+                ASSERT_TRUE(scene.UpdateVertices(0, MakeVecView(vertices, 3)));
+            }
             ASSERT_TRUE(scene.Update());
             if (frame == 6)
             {
@@ -360,9 +390,17 @@ TEST_P(RayQueryIntegrationTest, SceneSnapshotsTrackOpacityDeformationMotionAndRe
             RenderGraph& graph = *device->GetCurrentFrameRDG();
             ASSERT_TRUE(graph.Begin());
             ASSERT_TRUE(queries.BuildRenderGraph(scene));
-            EXPECT_EQ(queries.GetBuildStatistics().built, built[frame]);
+            if (frame == 10)
+            {
+                ASSERT_TRUE(graph.End()) << graph.GetResult().message;
+                queries.OnRenderGraphExecuted(RenderFrameResult::eDeclined);
+                ASSERT_TRUE(graph.Begin());
+                ASSERT_TRUE(queries.BuildRenderGraph(scene));
+            }
+            const bool ordinaryAlphaEdit = frame >= 10 && !device->GetGPUInfo().rayQuery.opacityMicromap;
+            EXPECT_EQ(queries.GetBuildStatistics().built, ordinaryAlphaEdit ? 0u : built[frame]);
             EXPECT_EQ(queries.GetBuildStatistics().updated, updated[frame]);
-            EXPECT_EQ(queries.GetBuildStatistics().reused, reused[frame]);
+            EXPECT_EQ(queries.GetBuildStatistics().reused, ordinaryAlphaEdit ? 1u : reused[frame]);
             BitField<RHIBufferUsageFlagBits> usage;
             usage.SetFlags(RHIBufferUsageFlagBits::eStorageBuffer, RHIBufferUsageFlagBits::eTransferSrcBuffer);
             RHIBuffer* output = Buffer(4 * sizeof(Vec4), usage, nullptr, RHIBufferAllocateType::eGPU);
@@ -376,6 +414,14 @@ TEST_P(RayQueryIntegrationTest, SceneSnapshotsTrackOpacityDeformationMotionAndRe
             pass.BindValue("uGISettings", gi, sizeof(gi));
             pass.BindValue("uSceneData", scene.GetSceneUniformData(), sizeof(SceneUniformData));
             queries.BindInputs(pass, scene);
+            if (frame == 1 && device->GetGPUInfo().rayQuery.opacityMicromap)
+            {
+                const RHIAccelerationStructure* tlas = pass.accelerationStructureBindings[0].pStructure;
+                ASSERT_EQ(tlas->GetReferencedStructures().size(), 1u);
+                const RHIAccelerationStructure* blas = tlas->GetReferencedStructures()[0];
+                ASSERT_EQ(blas->GetReferencedStructures().size(), 1u);
+                EXPECT_EQ(blas->GetReferencedStructures()[0]->GetType(), RHIAccelerationStructureType::eOpacityMicromap);
+            }
             graph.AddComputePass(std::move(pass)).RecordPassCommands([queryOffset](RDGPassCmdEncoder& encoder) {
                 encoder.SetPushConstants(queryOffset);
                 encoder.Dispatch(4, 1, 1);
@@ -780,6 +826,8 @@ TEST_P(RayQueryIntegrationTest, GraphBuildQueryUpdateAndEmptyScene)
 
 
 // Independent double-precision brute force over the authored triangles, never a traversal structure's records.
+#include "OpacityMicromapTests.inl"
+
 struct OracleTriangle
 {
     glm::dvec3 a, b, c;

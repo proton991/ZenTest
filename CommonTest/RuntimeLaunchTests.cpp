@@ -92,6 +92,7 @@ TEST(RuntimeLaunch, RoundTripFullConfigurationAndWideIds)
     source.rendering.gi.cone.previousFrameRadiance = true;
     source.rendering.gi.cone.probeSpacing          = 8;
     source.rendering.gi.cone.indirectIntensity     = 0.25f;
+    source.rendering.transparency                  = {rc::TransparencyCoreMode::eForce, .97f};
     source.rendering.cameraLight.position          = Vec3(1, 2, 3);
     source.rendering.cameraLight.followCamera      = false;
     source.rendering.environment.rotationDegrees   = 65.0f;
@@ -112,6 +113,7 @@ TEST(RuntimeLaunch, RoundTripFullConfigurationAndWideIds)
     ASSERT_TRUE(DecodeRuntimeLaunchSettings(json, loaded, error)) << error;
     EXPECT_EQ(loaded.sourcePath, source.sourcePath);
     EXPECT_EQ(loaded.rendering.gi, source.rendering.gi);
+    EXPECT_EQ(loaded.rendering.transparency, source.rendering.transparency);
     EXPECT_EQ(loaded.rendering.lights[0].id, 9007199254740993ull);
     EXPECT_EQ(loaded.rendering.debug.lightId, 9007199254740993ull);
     EXPECT_EQ(loaded.camera.eye, source.camera.eye);

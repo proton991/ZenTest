@@ -387,17 +387,24 @@ TEST_P(ConeVoxelGIIntegrationTest, CulledGBufferMatchesDirectOpaqueMaskedAndHybr
     blended.surfaceProperties.y = static_cast<float>(sg::AlphaMode::Blend);
     ASSERT_TRUE(scene.UpdateMaterial(2, blended));
     ASSERT_TRUE(scene.CommitGeometryUpdates());
-    RenderGraph blendGraph("SceneCullingMaterialUpdate");
-    ASSERT_TRUE(blendGraph.Begin());
-    RDGGraphicsPassDesc      blendPass = SceneCullRasterPass(scene, sampler, targets, false);
-    const SceneCullingResult blend     = AddCulledGBufferPass(*device, drawData, blendGraph, blendPass, scene);
-    ASSERT_EQ(blend.status, SceneCullingStatus::eCulled);
-    EXPECT_EQ(blend.candidateCount, moved.candidateCount - 2);
-    ClearUnusedSceneCullTargets(blendGraph, targets);
-    ASSERT_TRUE(blendGraph.End());
-    ASSERT_TRUE(device->ExecuteRenderGraph(blendGraph)) << blendGraph.GetResult().message;
-    device->FlushRHIThread();
-    device->WaitForIdle();
+    for (bool core : {true, false})
+    {
+        ASSERT_TRUE(
+            scene.SetTransparencySettings({core ? TransparencyCoreMode::eAutomatic : TransparencyCoreMode::eDisabled, .99f}));
+        ASSERT_TRUE(scene.CommitGeometryUpdates());
+        EXPECT_EQ(scene.GetMaterialsData()[2].textureSampling.z, core ? .99f : 0.0f);
+        RenderGraph blendGraph("SceneCullingMaterialUpdate");
+        ASSERT_TRUE(blendGraph.Begin());
+        RDGGraphicsPassDesc      blendPass = SceneCullRasterPass(scene, sampler, targets, false);
+        const SceneCullingResult blend     = AddCulledGBufferPass(*device, drawData, blendGraph, blendPass, scene);
+        ASSERT_EQ(blend.status, SceneCullingStatus::eCulled);
+        EXPECT_EQ(blend.candidateCount, moved.candidateCount - (core ? 0u : 2u));
+        ClearUnusedSceneCullTargets(blendGraph, targets);
+        ASSERT_TRUE(blendGraph.End());
+        ASSERT_TRUE(device->ExecuteRenderGraph(blendGraph)) << blendGraph.GetResult().message;
+        device->FlushRHIThread();
+        device->WaitForIdle();
+    }
     for (uint32_t index = 0; index < nodes.size(); ++index)
     {
         ASSERT_TRUE(scene.SetInstanceEnabled(index, false));

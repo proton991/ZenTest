@@ -12,6 +12,8 @@
 #include "Graphics/RenderCore/V2/ComputeDispatch.h"
 #include "Graphics/RenderCore/V2/Renderer/SceneCulling.h"
 #include "Graphics/RenderCore/V2/Renderer/ForwardDrawCache.h"
+#include "Graphics/RenderCore/V2/Renderer/ForwardDepthSort.h"
+#include "Graphics/RenderCore/V2/Renderer/DeferredLightingRenderer.h"
 #include "Graphics/RenderCore/V2/Renderer/RendererUtils.h"
 #include "SceneGraph/Camera.h"
 #include "Graphics/RenderCore/V2/RenderDevice.h"
@@ -172,6 +174,8 @@ template <class T> HeapVector<T> ReadStaticBuffer(RHIBuffer* buffer)
 #include "SceneCullingTests.inl"
 #include "SceneCullingRasterTests.inl"
 #include "ForwardBlendRasterTests.inl"
+#include "ForwardDepthSortTests.inl"
+#include "ForwardClusterCullingTests.inl"
 
 INSTANTIATE_TEST_SUITE_P(SubmissionModes, ConeVoxelGIIntegrationTest, testing::Values(0u, 1u, 2u, 3u));
 } // namespace
