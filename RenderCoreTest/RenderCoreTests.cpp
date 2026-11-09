@@ -1704,6 +1704,22 @@ RHIBuffer* RenderScene::GetUVBuffer() const
     return sceneInputs.uv;
 }
 
+uint32_t RenderScene::GetUVSetCount() const
+{
+    return m_uvCoordinates.empty() ? 0u : static_cast<uint32_t>(m_uvCoordinates[0].x);
+}
+
+Vec2 RenderScene::GetVertexUV(uint32_t vertex, uint32_t set) const
+{
+    const uint32_t stride = GetUVSetCount();
+    Vec2           uv(0);
+    if (vertex < m_vertices.size() && set < stride)
+    {
+        uv = m_uvCoordinates[1 + size_t(vertex) * stride + set];
+    }
+    return uv;
+}
+
 RHIBuffer* RenderScene::GetNodesDataSSBO() const
 {
     return sceneInputs.nodes;

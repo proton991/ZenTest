@@ -2987,6 +2987,12 @@ HeapVector<uint8_t> RenderReconstructedSky(rc::RenderDevice&      device,
     }
     if (valid)
     {
+        const rc::HybridGIRenderer* hybrid = device.GetRendererServer()->RequestDeferredLightingRenderer()->GetHybridGI();
+        EXPECT_NE(hybrid, nullptr);
+        if (hybrid != nullptr)
+        {
+            EXPECT_EQ(hybrid->UsesScreenProbes(), gatherCase.gather == rc::VoxelGISettings::Gather::Probes);
+        }
         const rc::DebugOutputDescription description = editor.GetViewport().GetSnapshot().debug;
         EXPECT_TRUE(description.available) << description.reason;
         pixels = ReadScenePixels(device, editor.GetViewport().GetRenderView().color);
@@ -3034,6 +3040,7 @@ TEST_P(EditorRendering, ScreenProbeGatherTracksPixelGatherOnCurvedGeometry)
     if (device->GetGPUInfo().rayQuery.IsUsable())
     {
         cases.push_back({"probes-hardware", rc::VoxelGISettings::Gather::Probes, rc::VoxelGISettings::RayProvider::Hardware});
+        cases.push_back({"pixel-hardware", rc::VoxelGISettings::Gather::Pixel, rc::VoxelGISettings::RayProvider::Hardware});
     }
     const HeapVector<uint8_t> reference = RenderReconstructedSky(*device, editor, settings, cases[0], 48);
     EXPECT_EQ(reference.size(), size_t(kWidth) * kHeight * 4);

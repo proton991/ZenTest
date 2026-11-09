@@ -827,6 +827,7 @@ TEST_P(RayQueryIntegrationTest, GraphBuildQueryUpdateAndEmptyScene)
 
 // Independent double-precision brute force over the authored triangles, never a traversal structure's records.
 #include "OpacityMicromapTests.inl"
+#include "RayHitLightingTests.inl"
 
 struct OracleTriangle
 {

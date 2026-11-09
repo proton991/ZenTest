@@ -738,11 +738,9 @@ bool BuildChangedRayQueryFrame(RenderDevice* device, RenderScene& scene, VoxelGI
     return ready;
 }
 
-// The field is prepared on the GPU whenever GI renders, also while HW RT traces every feature.
-// Compute without HW RT renders PBR until the field is published; HW toggles keep the published
-// field, so returning to Compute is immediate; a geometry change keeps tracing the published field
-// while the next generation builds.
-TEST_F(RenderCoreTest, ComputeFieldPreparationKeepsHardwareOrPBR)
+// Compute never builds or borrows HW RT, even on a capable device or immediately after HW use.
+// Explicit per-feature mixing stays intact; only the selected features may use HW queries.
+TEST_F(RenderCoreTest, ComputeFieldPreparationDoesNotBorrowHardware)
 {
     using Feature         = VoxelGISettings::Feature;
     using Provider        = VoxelGISettings::RayProvider;
@@ -752,6 +750,7 @@ TEST_F(RenderCoreTest, ComputeFieldPreparationKeepsHardwareOrPBR)
     sceneInputs.materials = Buffer();
     sceneInputs.uv        = Buffer();
     EnableDistanceFieldTestDevice(device);
+    rhi->info.rayQuery = {true, true, true, true, true, 256, 1024, 1024, 1024};
     sg::Scene source;
     source.GetAABB() = sg::AABB(Vec3(-1), Vec3(1));
     SceneData data{};
@@ -768,12 +767,15 @@ TEST_F(RenderCoreTest, ComputeFieldPreparationKeepsHardwareOrPBR)
     settings.SetAllFeatureProviders(Provider::Voxel);
     ASSERT_TRUE(gi.SetSettings(settings));
 
-    // Without HW RT, Compute renders PBR until the field is published.
+    // A capable device still prepares Compute without any acceleration-structure build.
     EXPECT_FALSE(BuildRayQueryFrame(device, gi));
     EXPECT_TRUE(gi.IsPreparingField());
     EXPECT_FALSE(gi.UsesFieldTraversal());
     EXPECT_EQ(gi.GetVisibilityGeneration(), 0u);
     EXPECT_STREQ(gi.GetProviderReason(), "field_preparing");
+    EXPECT_FALSE(gi.UsesHardwareQueries());
+    EXPECT_TRUE(rhi->graphics.accelerationStructureBuildCounts.empty());
+    EXPECT_TRUE(rhi->compute.accelerationStructureBuildCounts.empty());
     bool ready = false;
     for (uint32_t frame = 0; frame < 8 && !ready; ++frame)
     {
@@ -794,11 +796,15 @@ TEST_F(RenderCoreTest, ComputeFieldPreparationKeepsHardwareOrPBR)
     ASSERT_TRUE(BuildRayQueryFrame(device, gi));
     EXPECT_FALSE(gi.UsesFieldTraversal());
     EXPECT_EQ(gi.GetHardwareFeatureMask(), allFeatures);
+    EXPECT_FALSE(gi.UsesVoxelLighting());
     EXPECT_EQ(gi.GetDistanceField()->GetState(), DistanceFieldScene::State::Ready);
+    const size_t builds = rhi->graphics.accelerationStructureBuildCounts.size();
     settings.SetAllFeatureProviders(Provider::Voxel);
     ASSERT_TRUE(gi.SetSettings(settings));
     ASSERT_TRUE(BuildRayQueryFrame(device, gi));
     EXPECT_TRUE(gi.UsesFieldTraversal());
+    EXPECT_FALSE(gi.UsesHardwareQueries());
+    EXPECT_EQ(rhi->graphics.accelerationStructureBuildCounts.size(), builds);
     EXPECT_EQ(gi.GetVisibilityGeneration(), visibility);
 
     // A geometry change keeps the published field, with the edited regions stale, while the next
@@ -818,6 +824,32 @@ TEST_F(RenderCoreTest, ComputeFieldPreparationKeepsHardwareOrPBR)
     }
     EXPECT_TRUE(gi.GetDistanceField()->IsCurrent(scene));
     EXPECT_NE(gi.GetVisibilityGeneration(), visibility);
+    // Changing to a cold Compute field after HW use must not retain HW as a preview.
+    settings.SetAllFeatureProviders(Provider::Voxel);
+    settings.fieldResolution = 32;
+    ASSERT_TRUE(gi.SetSettings(settings));
+    const size_t beforeCold = rhi->graphics.accelerationStructureBuildCounts.size();
+    EXPECT_FALSE(BuildRayQueryFrame(device, gi));
+    EXPECT_TRUE(gi.IsPreparingField());
+    EXPECT_FALSE(gi.UsesHardwareQueries());
+    EXPECT_EQ(gi.GetHardwareFeatureMask(), 0u);
+    EXPECT_EQ(rhi->graphics.accelerationStructureBuildCounts.size(), beforeCold);
+    // Explicit HW unavailability does not silently select the field either.
+    settings.SetAllFeatureProviders(Provider::Hardware);
+    rhi->info.rayQuery = {};
+    ASSERT_TRUE(gi.SetSettings(settings));
+    EXPECT_FALSE(BuildRayQueryFrame(device, gi));
+    EXPECT_FALSE(gi.UsesFieldTraversal());
+    EXPECT_FALSE(gi.IsPreparingField());
+    // An unavailable explicitly mixed HW pass must not be replaced by the cold Compute preview.
+    settings.SetAllFeatureProviders(Provider::Voxel);
+    settings.SetFeatureProvider(Feature::SpecularOcclusion, Provider::Hardware);
+    settings.fieldResolution = 64;
+    ASSERT_TRUE(gi.SetSettings(settings));
+    EXPECT_FALSE(BuildRayQueryFrame(device, gi));
+    EXPECT_FALSE(gi.IsPreparingField());
+    EXPECT_FALSE(gi.UsesHardwareQueries());
+    EXPECT_STRNE(gi.GetProviderReason(), "field_preparing");
     gi.Destroy();
     volumes.Destroy();
     for (RHIBuffer* buffer :

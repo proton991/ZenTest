@@ -184,7 +184,6 @@ protected:
         ImGui::Begin("GI tracing test");
         ImGui::LogToBuffer();
         EXPECT_FALSE(DrawLightingBackendControls(settings, hardwareReady, reason));
-        EXPECT_FALSE(DrawGIGatherControls(settings));
         const std::string text = ImGui::GetCurrentContext()->LogBuffer.c_str();
         ImGui::LogFinish();
         ImGui::End();
@@ -234,7 +233,7 @@ TEST_F(LightingBackendControlsTest, ComputePreparationIsLeftToTheSceneView)
 TEST_F(LightingBackendControlsTest, SceneStatusDistinguishesPreparationRefinementAndReadiness)
 {
     EXPECT_EQ(GetGILightingStatus(GILightingState::Inactive, true), nullptr);
-    EXPECT_STREQ(GetGILightingStatus(GILightingState::Preparing, true), "GI active (HW RT). Preparing Compute GI...");
+    EXPECT_STREQ(GetGILightingStatus(GILightingState::Preparing, true), "HW RT passes active. Preparing Compute GI...");
     EXPECT_STREQ(GetGILightingStatus(GILightingState::Preparing, false), "Preparing GI...");
     EXPECT_STREQ(GetGILightingStatus(GILightingState::Refining, false), "GI active. Refining lighting...");
     EXPECT_STREQ(GetGILightingStatus(GILightingState::Ready, false), "GI ready");
@@ -252,10 +251,42 @@ TEST_F(LightingBackendControlsTest, HardwareReportsWhetherItIsActive)
     EXPECT_EQ(text.find("Probe spacing"), std::string::npos);
     text = Draw(settings, false);
     EXPECT_NE(text.find("ray queries unsupported"), std::string::npos);
-    EXPECT_EQ(CountOf(text, "{ HW RT (unavailable) } |"), 3u);
-    EXPECT_EQ(CountOf(text, "{ Shadow maps (HW RT unavailable) } |"), 1u);
+    EXPECT_EQ(CountOf(text, "{ HW RT (unavailable) } |"), 4u);
     EXPECT_TRUE(settings.rtShadows);
     EXPECT_EQ(settings.GetFeatureProvider(Feature::Shadows), Provider::Hardware);
+}
+
+TEST_F(LightingBackendControlsTest, GatherRemainsSelectableWithIndependentPassTracers)
+{
+    rc::VoxelGISettings settings;
+    SetGIRayTracing(settings, false);
+    settings.gather = rc::VoxelGISettings::Gather::Probes;
+    EXPECT_TRUE(settings.UsesScreenProbes());
+    SetGIPassTracer(settings, GIPass::Shadows, GITracer::HardwareRT);
+    EXPECT_TRUE(settings.UsesScreenProbes());
+    SetGIPassTracer(settings, GIPass::Specular, GITracer::HardwareRT);
+    EXPECT_TRUE(settings.UsesScreenProbes());
+    const std::string text = Draw(settings, true);
+    EXPECT_EQ(GetGIPassTracer(settings, GIPass::Diffuse), GITracer::Field);
+    EXPECT_NE(text.find("{ Screen probes } Gather"), std::string::npos);
+    EXPECT_NE(text.find("Probe spacing"), std::string::npos);
+    EXPECT_LT(text.find("Direct shadows"), text.find("{ Screen probes } Gather"));
+    SetGIPassTracer(settings, GIPass::Specular, GITracer::Field);
+    EXPECT_TRUE(settings.UsesScreenProbes());
+
+    SetGIRayTracing(settings, true);
+    EXPECT_FALSE(settings.UsesScreenProbes());
+    EXPECT_EQ(settings.gather, rc::VoxelGISettings::Gather::Pixel);
+    settings.gather = rc::VoxelGISettings::Gather::Probes;
+    EXPECT_TRUE(settings.UsesScreenProbes());
+    const std::string hardwareText = Draw(settings, true);
+    EXPECT_EQ(CountOf(hardwareText, "{ HW RT } |"), 4u);
+    EXPECT_NE(hardwareText.find("{ Screen probes } Gather"), std::string::npos);
+    EXPECT_NE(hardwareText.find("Probe spacing"), std::string::npos);
+    settings.gather             = rc::VoxelGISettings::Gather::Pixel;
+    const std::string pixelText = Draw(settings, true);
+    EXPECT_NE(pixelText.find("{ Per-pixel rays } Gather"), std::string::npos);
+    EXPECT_EQ(pixelText.find("Probe spacing"), std::string::npos);
 }
 
 TEST_F(LightingBackendControlsTest, OffPassesSayWhatReplacesThem)

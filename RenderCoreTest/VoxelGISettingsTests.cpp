@@ -266,8 +266,8 @@ TEST(VoxelGIRuntimeSettings, TraversalValidationRejectsInvalidEnumsAndAcceptsPro
     EXPECT_FALSE(ValidateVoxelGISettings(invalid));
 }
 
-// Presets gather through screen probes; the unpreset baseline keeps per-pixel rays.
-TEST(VoxelGIRuntimeSettings, ProbeGatherParsesBothSpacingsAndPresetsRestoreProbeDefaults)
+// Low/Medium use probes; the HW High/Ultra presets and unpreset baseline use per-pixel rays.
+TEST(VoxelGIRuntimeSettings, ProbeGatherParsesBothSpacingsAndPresetsRestoreGatherDefaults)
 {
     const VoxelGISettings defaults;
     EXPECT_EQ(defaults.gather, VoxelGISettings::Gather::Pixel);
@@ -306,6 +306,15 @@ TEST(VoxelGIRuntimeSettings, ProbeGatherParsesBothSpacingsAndPresetsRestoreProbe
     ASSERT_TRUE(ApplyVoxelGIPreset(VoxelGIPreset::Medium, settings));
     EXPECT_EQ(settings.cone.gather, VoxelGISettings::Gather::Probes);
     EXPECT_EQ(settings.cone.probeSpacing, 16u);
+    for (VoxelGIPreset preset : {VoxelGIPreset::High, VoxelGIPreset::Ultra})
+    {
+        ASSERT_TRUE(ApplyVoxelGIPreset(preset, settings));
+        EXPECT_EQ(settings.cone.gather, VoxelGISettings::Gather::Pixel);
+        EXPECT_EQ(GetVoxelGIPreset(settings), preset);
+        settings.cone.gather = VoxelGISettings::Gather::Probes;
+        EXPECT_TRUE(settings.cone.UsesScreenProbes());
+        EXPECT_EQ(GetVoxelGIPreset(settings), VoxelGIPreset::Custom);
+    }
 }
 
 // Brick-traced direct shadows were removed; configs that still name them load with triangle shadows.
@@ -443,6 +452,10 @@ TEST(VoxelGIRuntimeSettings, PresetsAllowExplicitOverridesAndRejectInvalidNamesT
     std::istringstream     overrides("voxel_gi_preset=ultra\nvoxel_resolution=64\nvoxel_gi_ray_provider=voxel\n");
     platform::ConfigLoader overrideConfig(overrides);
     ASSERT_TRUE(LoadVoxelGIRuntimeSettings(overrideConfig, settings));
+    // Overriding resolution/provider keeps Ultra's per-pixel gather until explicitly changed.
+    EXPECT_EQ(settings.cone.gather, VoxelGISettings::Gather::Pixel);
+    EXPECT_EQ(GetVoxelGIPreset(settings), VoxelGIPreset::Custom);
+    settings.cone.gather = VoxelGISettings::Gather::Probes;
     EXPECT_EQ(GetVoxelGIPreset(settings), VoxelGIPreset::Medium);
     EXPECT_EQ(settings.cone.GetHardwareFeatureMask(), 0u);
     const VoxelGIRuntimeSettings previous = settings;
