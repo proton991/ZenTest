@@ -84,6 +84,7 @@ TEST(RuntimeLaunch, RoundTripFullConfigurationAndWideIds)
     source.sourcePath                    = "source \"scene\" / \xE5\x9C\xBA\xE6\x99\xAF.gltf";
     source.processingProfile             = "desktop";
     source.rendering.algorithm           = rc::RenderAlgorithm::eVoxelGI;
+    source.rendering.normalMaps          = false;
     source.rendering.normalizationCenter = Vec3(2, 3, 4);
     source.rendering.normalizationScale  = 0.125f;
     source.rendering.gi.cone.samples     = 2;
@@ -112,6 +113,7 @@ TEST(RuntimeLaunch, RoundTripFullConfigurationAndWideIds)
     RuntimeLaunchSettings loaded;
     ASSERT_TRUE(DecodeRuntimeLaunchSettings(json, loaded, error)) << error;
     EXPECT_EQ(loaded.sourcePath, source.sourcePath);
+    EXPECT_FALSE(loaded.rendering.normalMaps);
     EXPECT_EQ(loaded.rendering.gi, source.rendering.gi);
     EXPECT_EQ(loaded.rendering.transparency, source.rendering.transparency);
     EXPECT_EQ(loaded.rendering.lights[0].id, 9007199254740993ull);
@@ -147,6 +149,27 @@ TEST(RuntimeLaunch, OlderSetupsDefaultToFullscreenAndRejectInvalidFullscreenFiel
     json.insert(position, "\"fullscreen\":true,");
     EXPECT_FALSE(DecodeRuntimeLaunchSettings(json, loaded, error));
     EXPECT_FALSE(loaded.run.fullscreen);
+}
+
+TEST(RuntimeLaunch, NormalMapsDefaultOnAndRejectNonBooleanValues)
+{
+    std::string json;
+    std::string error;
+    ASSERT_TRUE(EncodeRuntimeLaunchSettings(Fixture(), json, error));
+    const std::string field    = "\"normalMaps\":true,";
+    const size_t      position = json.find(field);
+    ASSERT_NE(position, std::string::npos);
+    json.erase(position, field.size());
+    RuntimeLaunchSettings loaded;
+    loaded.rendering.normalMaps = false;
+    ASSERT_TRUE(DecodeRuntimeLaunchSettings(json, loaded, error)) << error;
+    EXPECT_TRUE(loaded.rendering.normalMaps);
+    json.insert(position, "\"normalMaps\":false,");
+    ASSERT_TRUE(DecodeRuntimeLaunchSettings(json, loaded, error)) << error;
+    EXPECT_FALSE(loaded.rendering.normalMaps);
+    json.replace(position, std::string("\"normalMaps\":false,").size(), "\"normalMaps\":1,");
+    EXPECT_FALSE(DecodeRuntimeLaunchSettings(json, loaded, error));
+    EXPECT_FALSE(loaded.rendering.normalMaps);
 }
 
 TEST(RuntimeLaunch, RejectedInputPreservesPreviousSetup)
