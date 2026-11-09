@@ -15,6 +15,8 @@ void CreateHybridTestShaders(RenderDevice* device)
           {"ProbeAllocateSP", "VoxelGI/probe_allocate.comp.spv"},
           {"ProbeTraceHardwareSP", "VoxelGI/probe_trace_hardware.comp.spv"},
           {"ProbeTraceFieldSP", "VoxelGI/probe_trace_field.comp.spv"},
+          {"ProbeSkySourcesHardwareSP", "VoxelGI/probe_sky_sources_hardware.comp.spv"},
+          {"ProbeSkySourcesFieldSP", "VoxelGI/probe_sky_sources_field.comp.spv"},
           {"ProbeTemporalSP", "VoxelGI/probe_temporal.comp.spv"},
           {"ProbeFilterSP", "VoxelGI/probe_filter.comp.spv"},
           {"ProbeIntegrateSP", "VoxelGI/probe_integrate.comp.spv"},

@@ -23,6 +23,7 @@ protected:
     static constexpr uint32_t SubtileCount = 6;
     RHISampler*               sampler{nullptr};
     RHITexture*               receiver[6]{};
+    RHITexture*               sourceSky{nullptr};
     HybridGIUniformData       hybrid;
     ScreenProbeUniformData    probe;
     SceneUniformData          scene;
@@ -98,6 +99,7 @@ protected:
         receiver[3] = Upload(graph, DataFormat::eR32G32UInt, surface);
         receiver[4] = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(0, 0, 1, 0)));
         receiver[5] = Upload(graph, DataFormat::eR32G32B32A32SFloat, positions);
+        sourceSky   = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(0, 0, 0, 1)));
     }
 
     void Inputs(RDGComputePassDesc& pass, bool includeProbes = true)
@@ -123,6 +125,16 @@ protected:
         graph.AddComputePass(std::move(pass)).RecordPassCommands([groups](RDGPassCmdEncoder& encoder) {
             encoder.Dispatch(groups.x, groups.y, 1);
         });
+    }
+
+    RHITexture* SourceHistory(RenderGraph& graph, RDGComputePassDesc& pass, const Vec4& previous = Vec4(0))
+    {
+        RHITexture* old  = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, previous));
+        RHITexture* next = Texture(DataFormat::eR32G32B32A32SFloat);
+        pass.BindSampledTexture("probeSourceSky", sampler, sourceSky->GetDefaultView());
+        pass.BindSampledTexture("previousProbeSourceSky", sampler, old->GetDefaultView());
+        pass.BindStorageImage("nextProbeSourceSky", next->GetDefaultView(), RDGContentGuarantee::eFullWrite);
+        return next;
     }
 
     // probe_allocate_count.comp, then probe_allocate.comp, over every subtile of probe.adaptive.
@@ -415,6 +427,15 @@ TEST_P(ScreenProbeGatherIntegrationTest, ProbeSHReconstructionNormalizesAndFalls
         RenderGraph graph("TinyProbeReconstruction");
         ASSERT_TRUE(graph.Begin());
         Receivers(graph);
+        // Bright-source shadows retain pixel detail instead of entering probe interpolation.
+        HeapVector<Vec4> sourcePixels(Pixels, Vec4(0, 0, 0, 1));
+        for (uint32_t index = 2; index < Pixels; index += 2)
+        {
+            sourcePixels[index] = Vec4(.125f, .25f, .5f, 1);
+        }
+        // A missing source sample still adds its partial sum and keeps the probe sample valid.
+        sourcePixels[3] = Vec4(.0625f, .125f, .25f, -1);
+        sourceSky       = Upload(graph, DataFormat::eR32G32B32A32SFloat, sourcePixels);
         probe.grid.w    = scenario == 1 ? 0u : 1u;
         hybrid.bounce.w = scenario == 3 ? 1u : 0u;
         // Adaptive slots 6-8 stay empty; every subtile map entry is invalid.
@@ -475,12 +496,13 @@ TEST_P(ScreenProbeGatherIntegrationTest, ProbeSHReconstructionNormalizesAndFalls
         filter.BindStorageBuffer("ProbeOutput", filtered, RDGContentGuarantee::eFullWrite);
         filter.BindStorageBuffer("ProbeSubtiles", subtiles);
         Dispatch(graph, std::move(filter), 3, 3);
-        RHITexture*        sky    = Texture(DataFormat::eR16G16B16A16SFloat);
+        RHITexture*        sky    = Texture(DataFormat::eR32G32B32A32SFloat);
         RHITexture*        bounce = Texture(DataFormat::eR16G16B16A16SFloat);
         RDGComputePassDesc integrate;
         integrate.SetShaderProgramName("ProbeIntegrateSP");
         Inputs(integrate);
         integrate.BindStorageBuffer("ProbeInput", filtered);
+        integrate.BindSampledTexture("probeSourceSky", sampler, sourceSky->GetDefaultView());
         integrate.BindStorageBuffer("ProbeSubtiles", subtiles);
         integrate.BindStorageImage("probeRawSky", sky->GetDefaultView(), RDGContentGuarantee::eFullWrite);
         integrate.BindStorageImage("probeRawBounce", bounce->GetDefaultView(), RDGContentGuarantee::eFullWrite);
@@ -515,7 +537,7 @@ TEST_P(ScreenProbeGatherIntegrationTest, ProbeSHReconstructionNormalizesAndFalls
             // Indices 0 and 1 are not receivers. The last receiver lies off every probe's plane and
             // takes the facing-probe fallback, which here carries the same signal.
             const bool uncovered = index < 2;
-            ExpectColor(skyPixels[index], uncovered ? Vec4(0) : expectedSky);
+            ExpectColor(skyPixels[index], uncovered ? Vec4(0) : expectedSky + Vec4(Vec3(sourcePixels[index]), 0));
             ExpectColor(bouncePixels[index], uncovered ? Vec4(0) : expectedBounce);
         }
     }
@@ -548,12 +570,13 @@ TEST_P(ScreenProbeGatherIntegrationTest, AdaptiveProbesCoverReceiversUniformProb
                             subtiles.data());
     graph.GetResourceManager()->ImportHostWrittenBuffer(input);
     graph.GetResourceManager()->ImportHostWrittenBuffer(map);
-    RHITexture*        sky    = Texture(DataFormat::eR16G16B16A16SFloat);
+    RHITexture*        sky    = Texture(DataFormat::eR32G32B32A32SFloat);
     RHITexture*        bounce = Texture(DataFormat::eR16G16B16A16SFloat);
     RDGComputePassDesc integrate;
     integrate.SetShaderProgramName("ProbeIntegrateSP");
     Inputs(integrate);
     integrate.BindStorageBuffer("ProbeInput", input);
+    integrate.BindSampledTexture("probeSourceSky", sampler, sourceSky->GetDefaultView());
     integrate.BindStorageBuffer("ProbeSubtiles", map);
     integrate.BindStorageImage("probeRawSky", sky->GetDefaultView(), RDGContentGuarantee::eFullWrite);
     integrate.BindStorageImage("probeRawBounce", bounce->GetDefaultView(), RDGContentGuarantee::eFullWrite);
@@ -824,7 +847,7 @@ TEST_P(ScreenProbeGatherIntegrationTest, PixelTemporalUsesDiffuseSkyVisibilityWi
     // No history and no resolved specular sample (alpha -1): visibility falls back to the
     // receiver's diffuse sky visibility, with zero history length.
     const char* const names[]   = {"Sky", "Bounce", "Specular", "Position", "Surface", "NormalRoughness"};
-    const DataFormat  formats[] = {DataFormat::eR16G16B16A16SFloat, DataFormat::eR16G16B16A16SFloat,
+    const DataFormat  formats[] = {DataFormat::eR32G32B32A32SFloat, DataFormat::eR16G16B16A16SFloat,
                                    DataFormat::eR16G16B16A16SFloat, DataFormat::eR32G32B32A32SFloat,
                                    DataFormat::eR32G32UInt,         DataFormat::eR16G16B16A16SFloat};
     const Vec4        current[] = {Vec4(.25f, .5f, 1, .75f), Vec4(.1f, .2f, .4f, 1), Vec4(0, 0, 0, -1)};
@@ -836,6 +859,7 @@ TEST_P(ScreenProbeGatherIntegrationTest, PixelTemporalUsesDiffuseSkyVisibilityWi
     RDGComputePassDesc pass;
     pass.SetShaderProgramName("ProbePixelTemporalSP");
     Inputs(pass);
+    SourceHistory(graph, pass);
     for (uint32_t signal = 0; signal < 6; ++signal)
     {
         RHITexture* old = Texture(formats[signal]);
@@ -867,18 +891,24 @@ TEST_P(ScreenProbeGatherIntegrationTest, PixelTemporalUsesDiffuseSkyVisibilityWi
 
 TEST_P(ScreenProbeGatherIntegrationTest, PixelTemporalChecksReceiverHistoryAndSignalResets)
 {
-    const char* const names[]    = {"Sky", "Bounce", "Specular", "Position", "Surface", "NormalRoughness"};
-    const DataFormat  formats[]  = {DataFormat::eR16G16B16A16SFloat, DataFormat::eR16G16B16A16SFloat,
-                                    DataFormat::eR16G16B16A16SFloat, DataFormat::eR32G32B32A32SFloat,
-                                    DataFormat::eR32G32UInt,         DataFormat::eR16G16B16A16SFloat};
-    const Vec4        current[]  = {Vec4(.25f, .5f, 1, .75f), Vec4(.1f, .2f, .4f, 1), Vec4(.5f, 1, 2, .25f)};
-    const Vec4        previous[] = {Vec4(.75f, 1, 1.5f, .25f), Vec4(.6f, .8f, 1, 3), Vec4(1, 2, 3, .75f)};
+    const Vec3 currentSource(.125f, .25f, .5f);
+    // A 1/64 update below half-float precision must still advance the source history.
+    const Vec3        previousSource = currentSource + Vec3(1.0f / 32768, 1.0f / 16384, 1.0f / 8192);
+    const char* const names[]        = {"Sky", "Bounce", "Specular", "Position", "Surface", "NormalRoughness"};
+    const DataFormat  formats[]      = {DataFormat::eR32G32B32A32SFloat, DataFormat::eR16G16B16A16SFloat,
+                                        DataFormat::eR16G16B16A16SFloat, DataFormat::eR32G32B32A32SFloat,
+                                        DataFormat::eR32G32UInt,         DataFormat::eR16G16B16A16SFloat};
+    const Vec4        current[]      = {Vec4(.25f, .5f, 1, .75f), Vec4(.1f, .2f, .4f, 1), Vec4(.5f, 1, 2, .25f)};
+    const Vec4        previous[]     = {Vec4(.75f, 1, 1.5f, .25f), Vec4(.6f, .8f, 1, 3), Vec4(1, 2, 3, .75f)};
     for (uint32_t scenario = 0; scenario < 5; ++scenario)
     {
         SCOPED_TRACE(scenario);
         RenderGraph graph("TinyProbePixelHistory");
         ASSERT_TRUE(graph.Begin());
         Receivers(graph);
+        probe.parameters.y  = 128;
+        sourceSky           = Upload(graph, DataFormat::eR32G32B32A32SFloat,
+                                     HeapVector<Vec4>(Pixels, scenario == 4 ? Vec4(0, 0, 0, -1) : Vec4(currentSource, 1)));
         probe.grid.w        = scenario == 1 ? 0u : 1u;
         hybrid.bounce.y     = scenario == 2 ? 0u : 1u;
         hybrid.reflection.y = scenario == 2 ? 0u : 1u;
@@ -888,9 +918,12 @@ TEST_P(ScreenProbeGatherIntegrationTest, PixelTemporalChecksReceiverHistoryAndSi
         RHITexture* raw[3]{};
         for (uint32_t signal = 0; signal < 3; ++signal)
         {
-            const Vec4 sample = scenario == 4 ? Vec4(0, 0, 0, -1) : current[signal];
-            raw[signal]       = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, sample));
-            old[signal]       = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, previous[signal]));
+            const Vec4 sample =
+                scenario == 4 ? Vec4(0, 0, 0, -1) : current[signal] + (signal == 0 ? Vec4(currentSource, 0) : Vec4(0));
+            raw[signal] = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, sample));
+            old[signal] =
+                Upload(graph, DataFormat::eR32G32B32A32SFloat,
+                       HeapVector<Vec4>(Pixels, previous[signal] + (signal == 0 ? Vec4(previousSource, 0) : Vec4(0))));
         }
         HeapVector<Vec4>       positions(Pixels, Vec4(0, 0, 0, 3));
         HeapVector<glm::uvec2> surfaces(Pixels, glm::uvec2(0x80008000u, 1));
@@ -905,6 +938,7 @@ TEST_P(ScreenProbeGatherIntegrationTest, PixelTemporalChecksReceiverHistoryAndSi
         RDGComputePassDesc pass;
         pass.SetShaderProgramName("ProbePixelTemporalSP");
         Inputs(pass);
+        RHITexture* nextSource = SourceHistory(graph, pass, Vec4(previousSource, 63));
         for (uint32_t signal = 0; signal < 6; ++signal)
         {
             next[signal] = Texture(formats[signal]);
@@ -919,6 +953,7 @@ TEST_P(ScreenProbeGatherIntegrationTest, PixelTemporalChecksReceiverHistoryAndSi
             }
         }
         Dispatch(graph, std::move(pass), Width, Height);
+        RHIBuffer* sourceReadback = ReadColor(graph, nextSource);
         RHIBuffer* readback[6]{};
         for (uint32_t signal = 0; signal < 6; ++signal)
         {
@@ -929,6 +964,7 @@ TEST_P(ScreenProbeGatherIntegrationTest, PixelTemporalChecksReceiverHistoryAndSi
         }
         Execute(graph);
         ASSERT_FALSE(HasFatalFailure());
+        const HeapVector<Vec4> sourceResult = ReadStaticBuffer<Vec4>(sourceReadback);
         for (uint32_t signal = 0; signal < 6; ++signal)
         {
             if (signal != 4)
@@ -979,6 +1015,20 @@ TEST_P(ScreenProbeGatherIntegrationTest, PixelTemporalChecksReceiverHistoryAndSi
                         {
                             expected.w = reuseSignal ? 7.0f : 0.0f;
                         }
+                    }
+                    if (signal == 0 && valid)
+                    {
+                        const Vec3 source  = scenario == 4 ? (reuse ? previousSource : Vec3(0))
+                                           : reuse         ? glm::mix(previousSource, currentSource, 1.0f / 64.0f)
+                                                           : currentSource;
+                        expected          += Vec4(source, 0);
+                        for (uint32_t component = 0; component < 3; ++component)
+                        {
+                            EXPECT_NEAR(sourceResult[index][component], source[component], 1e-7f);
+                        }
+                        ExpectColor(sourceResult[index], Vec4(source, scenario == 4 ? (reuse ? 63.0f : 0.0f)
+                                                                      : reuse       ? 64.0f
+                                                                                    : 1.0f));
                     }
                     ExpectColor(result[index], expected);
                 }
@@ -1095,7 +1145,7 @@ TEST_P(ScreenProbeGatherIntegrationTest, DiagnosticTemporalKeepsMissingSamplesOu
 TEST_P(ScreenProbeGatherIntegrationTest, FusedReconstructionMatchesSeparatePassesAcrossHistoryStates)
 {
     const char* const names[]   = {"Sky", "Bounce", "Specular", "Position", "Surface", "NormalRoughness"};
-    const DataFormat  formats[] = {DataFormat::eR16G16B16A16SFloat, DataFormat::eR16G16B16A16SFloat,
+    const DataFormat  formats[] = {DataFormat::eR32G32B32A32SFloat, DataFormat::eR16G16B16A16SFloat,
                                    DataFormat::eR16G16B16A16SFloat, DataFormat::eR32G32B32A32SFloat,
                                    DataFormat::eR32G32UInt,         DataFormat::eR16G16B16A16SFloat};
     for (uint32_t scenario = 0; scenario < 5; ++scenario)
@@ -1104,6 +1154,7 @@ TEST_P(ScreenProbeGatherIntegrationTest, FusedReconstructionMatchesSeparatePasse
         RenderGraph graph("FusedProbeReconstruction");
         ASSERT_TRUE(graph.Begin());
         Receivers(graph);
+        sourceSky = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(.12f, .25f, .51f, 1)));
         // Fractional reprojection, background, foreign surfaces and a displaced history pixel.
         receiver[4] =
             Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(.5f / Width, .5f / Height, 1, 0)));
@@ -1153,6 +1204,7 @@ TEST_P(ScreenProbeGatherIntegrationTest, FusedReconstructionMatchesSeparatePasse
         integrate.SetShaderProgramName("ProbeIntegrateSP");
         Inputs(integrate);
         integrate.BindStorageBuffer("ProbeInput", input);
+        integrate.BindSampledTexture("probeSourceSky", sampler, sourceSky->GetDefaultView());
         integrate.BindStorageBuffer("ProbeSubtiles", map);
         integrate.BindStorageImage("probeRawSky", raw[0]->GetDefaultView(), RDGContentGuarantee::eFullWrite);
         integrate.BindStorageImage("probeRawBounce", raw[1]->GetDefaultView(), RDGContentGuarantee::eFullWrite);
@@ -1185,6 +1237,7 @@ TEST_P(ScreenProbeGatherIntegrationTest, FusedReconstructionMatchesSeparatePasse
             RDGComputePassDesc pass;
             pass.SetShaderProgramName(fused != 0 ? "ProbeReconstructSP" : "ProbePixelTemporalSP");
             Inputs(pass);
+            SourceHistory(graph, pass);
             if (fused != 0)
             {
                 pass.BindStorageBuffer("ProbeInput", input);
