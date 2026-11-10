@@ -250,7 +250,7 @@ TEST_P(ConeVoxelGIIntegrationTest, SceneTriangleRecordsFollowMasksAndMaterialsAc
         device->WaitForPreviousFrames();
         const HeapVector<uint8_t> gpuVertices  = ReadStaticBuffer<uint8_t>(snapshots[0]);
         const HeapVector<uint8_t> gpuNodes     = ReadStaticBuffer<uint8_t>(snapshots[1]);
-        const HeapVector<Vec4>    gpuUV        = ReadStaticBuffer<Vec4>(snapshots[2]);
+        const HeapVector<Vec2>    gpuUV        = ReadStaticBuffer<Vec2>(snapshots[2]);
         const HeapVector<uint8_t> gpuMaterials = ReadStaticBuffer<uint8_t>(snapshots[3]);
         const HeapVector<uint8_t> gpuPrevious  = ReadStaticBuffer<uint8_t>(snapshots[4]);
         EXPECT_EQ(

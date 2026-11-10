@@ -5287,12 +5287,12 @@ TEST_F(RenderCoreTest, VoxelRadianceResourcesAreAllocatedOnlyOnDemand)
 
     EXPECT_TRUE(volumes.ProducesRadianceInputs());
 
-    // Radiance, sky irradiance, normal, emission, the class owners and the unshadowed map placeholder.
-    EXPECT_EQ(rhi->textureCreations, before + 9);
+    // Radiance, sky irradiance, normal, emission, class owners, unshadowed map and unused-lighting placeholders.
+    EXPECT_EQ(rhi->textureCreations, before + 10);
 
     EXPECT_TRUE(gi.Init());
 
-    EXPECT_EQ(rhi->textureCreations, before + 9);
+    EXPECT_EQ(rhi->textureCreations, before + 10);
 
     VoxelGISettings invalid = gi.GetSettings();
 

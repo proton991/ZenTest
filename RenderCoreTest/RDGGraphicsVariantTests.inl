@@ -128,6 +128,7 @@ TEST_F(RenderCoreTest, ForwardBlendDrawsTrianglesUntilADeclinedSortedUploadSucce
          {std::array<const char*, 3>{"ForwardBackgroundSP", "SceneRenderer/deferred.vert.spv",
                                      "SceneRenderer/forward_background.frag.spv"},
           {"ForwardMaterialSP", "SceneRenderer/offscreen.vert.spv", "SceneRenderer/forward_material.frag.spv"},
+          {"ForwardMaterialBasicSP", "SceneRenderer/offscreen.vert.spv", "SceneRenderer/forward_material.frag.spv"},
           {"ForwardToneMapSP", "SceneRenderer/deferred.vert.spv", "SceneRenderer/forward_tonemap.frag.spv"}})
     {
         RHIShaderCreateInfo info;
