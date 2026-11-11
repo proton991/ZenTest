@@ -354,11 +354,15 @@ TEST(ShaderReflectionTests, VoxelAtomicAndRadianceWritesRemainWritable)
     // Every injection writes the cache, so the graph knows its contents even without mesh light visibility.
     ExpectWritable(inject, "LightVisibilityCache", true);
 
-    const RHIShaderGroupInfo trace = ReflectStage(RHIShaderStage::eCompute, "VoxelGI/hybrid_trace_hardware.comp.spv");
+    const RHIShaderGroupInfo hardwareTrace = ReflectStage(RHIShaderStage::eCompute, "VoxelGI/hybrid_trace_hardware.comp.spv");
+    const RHIShaderGroupInfo fieldTrace =
+        ReflectStage(RHIShaderStage::eCompute, "VoxelGI/hybrid_trace_hardware_field.comp.spv");
 
+    // Pure HW hit lighting has no voxel cache; mixed HW/field tracing still reads it.
     for (NameID name : {"HitLightCache", "HitLightCachePrevious", "hitReflectance"})
     {
-        ExpectWritable(trace, name, false);
+        EXPECT_EQ(FindBinding(hardwareTrace, name), nullptr);
+        ExpectWritable(fieldTrace, name, false);
     }
 
     const RHIShaderGroupInfo reset = ReflectStage(RHIShaderStage::eCompute, "VoxelGI/reset_voxel_texture.comp.spv");

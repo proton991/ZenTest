@@ -5,6 +5,15 @@ void CreateHybridTestShaders(RenderDevice* device)
     for (const std::array<const char*, 2>& shader :
          {std::array<const char*, 2>{"HybridTraceHardwareSP", "VoxelGI/hybrid_trace_hardware.comp.spv"},
           {"HybridTraceHardwareCountsSP", "VoxelGI/hybrid_trace_hardware_counts.comp.spv"},
+          {"HybridTraceReSTIRHardwareSP", "VoxelGI/hybrid_trace_restir_hardware.comp.spv"},
+          {"ReSTIRTemporalSP", "VoxelGI/restir_temporal.comp.spv"},
+          {"ReSTIRSpatialSP", "VoxelGI/restir_spatial.comp.spv"},
+          {"LightOccludersCountsSP", "ShadowMapping/light_occluders_counts.comp.spv"},
+          {"LightOccludersSP", "ShadowMapping/light_occluders.comp.spv"},
+          {"HybridDownsampleSP", "VoxelGI/hybrid_downsample.comp.spv"},
+          {"HybridReconstructFallbackSP", "VoxelGI/hybrid_reconstruct_fallback.comp.spv"},
+          {"HybridReconstructSP", "VoxelGI/hybrid_reconstruct.comp.spv"},
+          {"ReSTIRLobeIntegralSP", "VoxelGI/restir_lobe_integral.comp.spv"},
           {"HybridTraceFieldSP", "VoxelGI/hybrid_trace_field.comp.spv"},
           {"HybridTraceCountsFieldSP", "VoxelGI/hybrid_trace_counts_field.comp.spv"},
           {"ProbeClearSP", "VoxelGI/probe_clear.comp.spv"},
@@ -86,6 +95,129 @@ TEST(HybridGIRenderer, SkyLightNeedsEnvironmentLightingAndALitEnvironment)
     EXPECT_FALSE(HybridGIRenderer::HasSkyLight(settings, scene));
 }
 
+TEST_F(RenderCoreTest, ReSTIRHistoriesFollowLightingRevisionsAndDeclinedModeChanges)
+{
+    rhi->info.rayQuery              = {true, true, true, true, true, 256, 1024, 1024, 1024};
+    rhi->info.maxStorageBufferRange = UINT32_MAX;
+    CreateHybridTestShaders(device);
+    TestViewport            viewport;
+    HeapVector<RHIBuffer*>  ownedBuffers;
+    HeapVector<RHITexture*> ownedTextures;
+    AllocateRendererInputs(0, viewport, ownedBuffers, ownedTextures);
+    sceneInputs.camera.projViewMatrix = sceneInputs.camera.proj = sceneInputs.camera.view = Mat4(1);
+    sg::Scene source;
+    source.GetAABB() = sg::AABB(Vec3(-1), Vec3(1));
+    SceneData data{};
+    data.pScene = &source;
+    RenderScene      scene(device, data);
+    SceneLight       light;
+    const LightId    lightId = scene.GetLights().Add(light);
+    TestVoxelVolumes volumes(device, DataFormat::eR8G8B8A8UNORM);
+    volumes.Init();
+    volumes.SetRenderScene(&scene);
+    VoxelGIRenderer gi(device, &volumes);
+    gi.SetRenderScene(&scene);
+    ASSERT_TRUE(gi.Init());
+    VoxelGISettings settings;
+    settings.SetAllFeatureProviders(VoxelGISettings::RayProvider::Hardware);
+    settings.restirGI = true;
+    ASSERT_TRUE(gi.SetSettings(settings));
+    DeferredLightingRenderer renderer(device);
+    renderer.Init();
+    renderer.SetRenderScene(&scene);
+    const RenderView view = RenderView::FromViewport(viewport);
+    for (uint32_t frame = 0; frame < 16; ++frame)
+    {
+        SCOPED_TRACE(frame);
+        if (frame == 2)
+        {
+            light.position.x = 0.1f;
+            ASSERT_TRUE(scene.GetLights().Update(lightId, light));
+        }
+        if (frame == 4)
+        {
+            ASSERT_TRUE(scene.CommitGeometryUpdates());
+        }
+        if (frame == 5 || frame == 6)
+        {
+            settings.restirGI = frame == 6;
+            ASSERT_TRUE(gi.SetSettings(settings));
+        }
+        if (frame == 8 || frame == 10 || frame == 13)
+        {
+            settings.pixelResolutionDivisor = frame == 8 ? 2u : (frame == 10 ? 4u : 1u);
+            ASSERT_TRUE(gi.SetSettings(settings));
+        }
+        if (frame == 14 || frame == 15)
+        {
+            settings.pixelResolutionDivisor = 4;
+            settings.referenceSamples       = frame == 14 ? 256u : 0u;
+            ASSERT_TRUE(gi.SetSettings(settings));
+        }
+        RenderGraph& graph = *device->GetCurrentFrameRDG();
+        ASSERT_TRUE(graph.Begin());
+        if (frame == 0)
+        {
+            for (RHITexture* texture : ownedTextures)
+            {
+                if (texture != viewport.depth)
+                {
+                    graph.AddTransferPass("InitializeReSTIRInput").ClearTexture(texture, Color(0));
+                }
+            }
+        }
+        renderer.BuildGBufferGraph(view, true);
+        gi.BuildRayQueryGraph();
+        gi.BuildRenderGraph();
+        HybridGIRenderer* hybrid = renderer.GetHybridGI();
+        ASSERT_TRUE(hybrid->BuildRenderGraph(view, gi));
+        const uint32_t divisor = settings.referenceSamples != 0 ? 1u : settings.pixelResolutionDivisor;
+        EXPECT_EQ(hybrid->GetGIExtent(), (glm::uvec2(view.width, view.height) + glm::uvec2(divisor - 1u)) / divisor);
+        ASSERT_TRUE(graph.End()) << graph.GetResult().message;
+        const bool declined = frame == 5 || frame == 10;
+        if (!declined)
+        {
+            const size_t begin = rhi->graphics.values.size();
+            ASSERT_TRUE(device->ExecuteRenderGraph(graph)) << graph.GetResult().message;
+            bool found = false;
+            for (size_t i = begin; i < rhi->graphics.values.size(); ++i)
+            {
+                if (rhi->graphics.valueBindings[i] == glm::uvec2(1, 0)
+                    && rhi->graphics.values[i].size() == sizeof(HybridGIUniformData))
+                {
+                    HybridGIUniformData uniforms;
+                    std::memcpy(&uniforms, rhi->graphics.values[i].data(), sizeof(uniforms));
+                    const uint32_t valid = frame == 1 || frame == 3 || frame == 7 || frame == 9 || frame == 12 ? 1u : 0u;
+                    EXPECT_EQ(uniforms.bounce.y, valid);
+                    EXPECT_EQ(uniforms.reflection.y, valid);
+                    EXPECT_EQ(uniforms.reservoir.x, frame == 14 ? 0u : 3u);
+                    found = true;
+                }
+            }
+            EXPECT_TRUE(found);
+        }
+        const RenderFrameResult result = declined ? RenderFrameResult::eDeclined : RenderFrameResult::eSubmitted;
+        renderer.OnRenderGraphExecuted(result);
+        gi.OnVisibilityGraphExecuted(result);
+        gi.OnRenderGraphExecuted(result);
+        volumes.OnRenderGraphExecuted(result);
+        EXPECT_EQ(hybrid->IsHistoryValid(), !declined);
+        device->NextFrame();
+    }
+    renderer.Destroy();
+    gi.Destroy();
+    volumes.Destroy();
+    for (RHIBuffer* buffer : ownedBuffers)
+    {
+        device->DestroyBuffer(buffer);
+    }
+    for (RHITexture* texture : ownedTextures)
+    {
+        device->DestroyTexture(texture);
+    }
+    sceneInputs = {};
+}
+
 TEST_F(RenderCoreTest, HybridHistoriesPublishOnlySuccessfulFramesAndResizePerView)
 {
     CreateHybridTestShaders(device);
@@ -111,7 +243,8 @@ TEST_F(RenderCoreTest, HybridHistoriesPublishOnlySuccessfulFramesAndResizePerVie
     VoxelGISettings bounceSettings;
     bounceSettings.bounceSource = VoxelGISettings::BounceSource::Rays;
     // Exercise reflected-hit histories on the compute-only test device.
-    bounceSettings.reflections = VoxelGISettings::Reflections::On;
+    bounceSettings.reflections            = VoxelGISettings::Reflections::On;
+    bounceSettings.pixelResolutionDivisor = 4; // Compute retains native pixel history even with HW reconstruction requested.
     // Opt into half-resolution diffuse to exercise its trace, upsample and fallback passes.
     bounceSettings.diffuseResolution = VoxelGISettings::DiffuseResolution::Half;
     ASSERT_TRUE(gi.SetSettings(bounceSettings));
@@ -363,7 +496,8 @@ TEST_F(RenderCoreTest, HybridHistoriesPublishOnlySuccessfulFramesAndResizePerVie
                     EXPECT_EQ(reuse, glm::uvec4(frame == 19 ? 0u : expected, expected, 1u, 0u));
                     ++reuseValues;
                 }
-                if (rhi->graphics.values[value].size() == sizeof(HybridGIUniformData))
+                if (rhi->graphics.valueBindings[value] == glm::uvec2(1, 0)
+                    && rhi->graphics.values[value].size() == sizeof(HybridGIUniformData))
                 {
                     HybridGIUniformData uniforms;
                     std::memcpy(&uniforms, rhi->graphics.values[value].data(), sizeof(uniforms));
@@ -1243,7 +1377,8 @@ TEST_P(DelayedRadianceTest, PublishesPairedCachesAcrossDeclineResizeResetAndIdle
 
             for (size_t value = valuesBefore; value < rhi->graphics.values.size(); ++value)
             {
-                if (rhi->graphics.values[value].size() == sizeof(HybridGIUniformData))
+                if (rhi->graphics.valueBindings[value] == glm::uvec2(1, 0)
+                    && rhi->graphics.values[value].size() == sizeof(HybridGIUniformData))
                 {
                     HybridGIUniformData uniforms;
 

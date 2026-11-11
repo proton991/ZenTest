@@ -4,6 +4,8 @@
 #include "Graphics/RenderCore/V2/SceneRayQuery.h"
 #include "Graphics/RenderCore/V2/DistanceFieldScene.h"
 #include "Graphics/RenderCore/V2/Renderer/VoxelGIRenderer.h"
+#include "Graphics/RenderCore/V2/Renderer/HybridGIRenderer.h"
+#include "Graphics/Shared/ReSTIRGI.h"
 #include "Graphics/Shared/EnvironmentSampling.h"
 #include "Graphics/RenderCore/V2/RenderScene.h"
 #include "Graphics/RHI/RHIGPUFrameTiming.h"
@@ -874,6 +876,7 @@ protected:
     }
 };
 
+#include "ReSTIRRayQueryTests.inl"
 #include "DistanceFieldSceneTests.inl"
 #include "DistanceFieldDiagnostics.inl"
 #include "DistanceFieldLanternTests.inl"

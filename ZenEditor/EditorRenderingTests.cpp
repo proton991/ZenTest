@@ -2196,7 +2196,7 @@ TEST_P(EditorRendering, DebugOutputsRetireAcrossModeSceneAndExtentChanges)
          {rc::DebugOutput::eFinal, rc::DebugOutput::eAlbedo, rc::DebugOutput::eNormal, rc::DebugOutput::eDepth,
           rc::DebugOutput::eShadow, rc::DebugOutput::eVoxelSlice, rc::DebugOutput::eVoxels, rc::DebugOutput::eGIRawSky,
           rc::DebugOutput::eGIReconstructedSky, rc::DebugOutput::eGIHistoryLength, rc::DebugOutput::eGIHitMiss,
-          rc::DebugOutput::eGIRejection})
+          rc::DebugOutput::eGIRejection, rc::DebugOutput::eGIFallback})
     {
         settings.debug.output = output;
         settings.algorithm = output >= rc::DebugOutput::eGIRawSky ? rc::RenderAlgorithm::eVoxelGI : rc::RenderAlgorithm::ePBR;
@@ -2937,7 +2937,9 @@ TEST_P(EditorRendering, ColdHardwareToComputeSwitchKeepsRenderingUntilReady)
             rc::VoxelGISettings::RayProvider::Auto;
         ASSERT_TRUE(editor.StageRenderingSettings(settings, true));
         ASSERT_TRUE(editor.UpdateRenderingSettings()) << editor.GetRenderingState().GetError();
-        ASSERT_TRUE(RenderUntilComputeReady(*device, editor, settings.gi.cone, csv, "cold"));
+        // Compute never borrows HW RT during field preparation: the cold switch shows the coarse
+        // Compute preview, not the previously selected hardware backend.
+        ASSERT_TRUE(RenderUntilComputeReady(*device, editor, settings.gi.cone, csv, "cold", false));
         const uint64_t generation = gi.GetDistanceField()->GetGeneration();
 
         settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Hardware);

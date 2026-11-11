@@ -16,7 +16,7 @@ endif()
 add_library(ZenVulkanTestMain STATIC CommonTest/VulkanTestMain.cpp)
 target_link_libraries(ZenVulkanTestMain PUBLIC ZenCore gtest)
 add_executable(RuntimeLaunchTest CommonTest/RuntimeLaunchTests.cpp CommonTest/CameraPathTests.cpp
-    ../ZenApp/CameraPath.cpp ../ZenApp/RuntimeJson.cpp)
+    ../ZenApp/CameraPath.cpp ../ZenApp/LightPath.cpp ../ZenApp/RuntimeJson.cpp)
 target_link_libraries(RuntimeLaunchTest PRIVATE ZenCore gtest_main simdjson)
 add_test(NAME RuntimeLaunchTest COMMAND RuntimeLaunchTest)
 set_tests_properties(RuntimeLaunchTest PROPERTIES LABELS "unit" TIMEOUT 30)

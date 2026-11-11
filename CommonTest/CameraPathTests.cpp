@@ -1,4 +1,5 @@
 #include "../../ZenApp/CameraPath.h"
+#include "../../ZenApp/LightPath.h"
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
@@ -46,5 +47,33 @@ TEST(CameraPath, RejectsInvalidFilesWithoutPublishingPartialKeys)
     std::error_code fileError;
     std::filesystem::remove(path, fileError);
     EXPECT_FALSE(fileError);
+}
+
+TEST(LightPath, HoldsKeysAndRejectsInvalidInputWithoutPublishing)
+{
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "zen-light-path-test.json";
+    const char* documents[] = {R"({"lightId":12,"keys":[{"frame":1,"position":[0,1,2]},{"frame":4,"position":[3,4,5]}]})",
+                               R"({"lightId":0,"keys":[{"frame":1,"position":[0,1,2]}]})",
+                               R"({"lightId":12,"keys":[{"frame":1,"position":[0,1,2]},{"frame":1,"position":[3,4,5]}]})",
+                               R"({"lightId":12,"keys":[{"frame":1,"position":[0,1e100,2]}]})", R"({"lightId":12,"keys":[]})"};
+    LightPath   result;
+    for (size_t index = 0; index < std::size(documents); ++index)
+    {
+        SCOPED_TRACE(index);
+        std::ofstream file(path);
+        file << documents[index];
+        file.close();
+        std::string error;
+        EXPECT_EQ(ReadLightPath(path.string(), result, error), index == 0);
+        EXPECT_EQ(result.id, 12u);
+        ASSERT_EQ(result.keys.size(), 2u);
+        EXPECT_EQ(LightPathPosition(result, 1), Vec3(0, 1, 2));
+        EXPECT_EQ(LightPathPosition(result, 3), Vec3(0, 1, 2));
+        EXPECT_EQ(LightPathPosition(result, 4), Vec3(3, 4, 5));
+        EXPECT_EQ(LightPathPosition(result, 10), Vec3(3, 4, 5));
+    }
+    std::error_code error;
+    std::filesystem::remove(path, error);
+    EXPECT_FALSE(error);
 }
 } // namespace

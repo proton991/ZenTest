@@ -6,6 +6,7 @@
 #include "Graphics/RenderCore/V2/Renderer/VoxelizerBase.h"
 #include "Graphics/RenderCore/V2/RenderScene.h"
 #include "Graphics/Shared/LightingCapture.h"
+#include <glm/gtc/packing.hpp>
 #include "Graphics/RenderCore/V2/Renderer/GBuffer.h"
 #include "Graphics/RenderCore/V2/Renderer/HybridGIRenderer.h"
 #include "Graphics/Shared/ScreenProbe.h"
@@ -168,6 +169,7 @@ template <class T> HeapVector<T> ReadStaticBuffer(RHIBuffer* buffer)
 #include "DistanceFieldIntegrationTests.inl"
 #include "ConeEnvironmentTests.inl"
 #include "HybridEstimatorTests.inl"
+#include "ReSTIRTests.inl"
 #include "ScreenProbeGatherIntegrationTests.inl"
 #include "CompactGBufferTests.inl"
 #include "SceneGeometryUpdatesTests.inl"

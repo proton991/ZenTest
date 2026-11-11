@@ -80,14 +80,18 @@ TEST(RuntimeConfig, ExplicitSourceDoesNotUseGlobalFile)
 
 TEST(RuntimeLaunch, RoundTripFullConfigurationAndWideIds)
 {
-    RuntimeLaunchSettings source         = Fixture();
-    source.sourcePath                    = "source \"scene\" / \xE5\x9C\xBA\xE6\x99\xAF.gltf";
-    source.processingProfile             = "desktop";
-    source.rendering.algorithm           = rc::RenderAlgorithm::eVoxelGI;
-    source.rendering.normalMaps          = false;
-    source.rendering.normalizationCenter = Vec3(2, 3, 4);
-    source.rendering.normalizationScale  = 0.125f;
-    source.rendering.gi.cone.samples     = 2;
+    RuntimeLaunchSettings source                    = Fixture();
+    source.sourcePath                               = "source \"scene\" / \xE5\x9C\xBA\xE6\x99\xAF.gltf";
+    source.processingProfile                        = "desktop";
+    source.rendering.algorithm                      = rc::RenderAlgorithm::eVoxelGI;
+    source.rendering.normalMaps                     = false;
+    source.rendering.normalizationCenter            = Vec3(2, 3, 4);
+    source.rendering.normalizationScale             = 0.125f;
+    source.rendering.gi.cone.samples                = 2;
+    source.rendering.gi.cone.pixelResolutionDivisor = 2;
+    source.rendering.gi.cone.restirGI               = true;
+    source.rendering.gi.cone.restirSpatial          = false;
+    source.rendering.gi.cone.restirSpecular         = false;
     source.rendering.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Hardware);
     source.rendering.gi.reflectanceBudgetBytes     = 4294967296ull;
     source.rendering.gi.cone.previousFrameRadiance = true;

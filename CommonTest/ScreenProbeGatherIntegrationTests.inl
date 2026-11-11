@@ -97,7 +97,7 @@ protected:
         receiver[1] = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(.5f, .5f, 0, 0)));
         receiver[2] = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(0, .5f, 0, 0)));
         receiver[3] = Upload(graph, DataFormat::eR32G32UInt, surface);
-        receiver[4] = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(0, 0, 1, 0)));
+        receiver[4] = Upload(graph, DataFormat::eR32G32SFloat, HeapVector<Vec2>(Pixels, Vec2(0)));
         receiver[5] = Upload(graph, DataFormat::eR32G32B32A32SFloat, positions);
         sourceSky   = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(0, 0, 0, 1)));
     }
@@ -1130,7 +1130,8 @@ TEST_P(ScreenProbeGatherIntegrationTest, DiagnosticTemporalKeepsMissingSamplesOu
             }
             if (signal == 3 && scenario == 2)
             {
-                expected.z = 1;
+                // Reset reason 1 for the diffuse history plus 16 times reset reason 1 for reflections.
+                expected.z = 17;
                 expected.w = .5f;
             }
             if (signal == 9)
@@ -1139,6 +1140,94 @@ TEST_P(ScreenProbeGatherIntegrationTest, DiagnosticTemporalKeepsMissingSamplesOu
             }
             ExpectColor(result[76], expected);
         }
+    }
+}
+
+TEST_P(ScreenProbeGatherIntegrationTest, ReducedPixelReflectionKeepsReprojectedRoughHistoryAndRejectsChanges)
+{
+    const char* const names[]   = {"Sky",    "Specular", "Moments", "Length",        "Position",
+                                   "Normal", "Receiver", "Bounce",  "BounceMoments", "Reflection"};
+    const DataFormat  formats[] = {DataFormat::eR32G32B32A32SFloat, DataFormat::eR16G16B16A16SFloat,
+                                   DataFormat::eR32G32B32A32SFloat, DataFormat::eR16G16B16A16SFloat,
+                                   DataFormat::eR32G32B32A32SFloat, DataFormat::eR16G16SFloat,
+                                   DataFormat::eR32G32UInt,         DataFormat::eR32G32B32A32SFloat,
+                                   DataFormat::eR32G32SFloat,       DataFormat::eR32G32B32A32SFloat};
+    for (uint32_t scenario = 0; scenario < 16; ++scenario)
+    {
+        SCOPED_TRACE(scenario);
+        RenderGraph graph("ReprojectedRoughReflection");
+        ASSERT_TRUE(graph.Begin());
+        Receivers(graph);
+        const uint32_t divisor      = scenario == 0 || scenario == 7 || scenario == 11 ? 1u : scenario == 15 ? 2u : 4u;
+        const float    roughness    = scenario == 6 || scenario == 8 || scenario == 14 ? .1f : .7f;
+        const float    oldRoughness = scenario == 2                                    ? .95f
+                                    : scenario == 0 || scenario == 8 || scenario >= 10 ? roughness
+                                                                                       : roughness + .05f;
+        // A normal-map texel can tilt the shading normal without changing the supporting plane, and
+        // a roughness texel can differ by a relative 0.15. Rough native receivers accept both like
+        // reduced ones (scenarios 7 and 11); glossy receivers, large tilts and changed geometric normals
+        // must still reject them.
+        const float    oldNormalX   = scenario == 12 ? .8f : scenario >= 10 && scenario != 13 ? .6f : .5f;
+        const uint32_t oldGeometric = scenario == 13 ? glm::packUnorm2x16(Vec2(.6f, .5f)) : 0x80008000u;
+        hybrid.resolution           = glm::uvec4(Width * divisor, Height * divisor, divisor, 0);
+        hybrid.previousViewPosition = scene.viewPos = Vec4(0, 0, 1, 1);
+        hybrid.reflection.y                         = scenario == 5 ? 0u : 1u;
+        hybrid.reflection.z                         = scenario == 9 ? 1u : 0u;
+        receiver[2] = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(0, roughness, 0, 0)));
+        receiver[4] = Upload(graph, DataFormat::eR32G32SFloat, HeapVector<Vec2>(Pixels, Vec2(2.0f / Width, 0)));
+        const Vec4         previous[] = {Vec4(0),
+                                         Vec4(1),
+                                         Vec4(1),
+                                         Vec4(100, 100, 0, oldRoughness),
+                                         Vec4(0, 0, scenario == 4 ? 1.0f : 0.0f, oldRoughness),
+                                         Vec4(oldNormalX, .5f, 0, 0),
+                                         Vec4(0),
+                                         Vec4(0, 0, 0, 100),
+                                         Vec4(0),
+                                         Vec4(.25f, 1, 1, 100)};
+        RDGComputePassDesc pass;
+        pass.SetShaderProgramName("HybridTemporalSP");
+        Inputs(pass, false);
+        RHITexture* output[10]{};
+        for (uint32_t signal = 0; signal < 10; ++signal)
+        {
+            RHITexture* history =
+                signal == 6 ? Upload(graph, DataFormat::eR32G32UInt,
+                                     HeapVector<glm::uvec2>(Pixels, glm::uvec2(oldGeometric, scenario == 3 ? 99u : 1u)))
+                            : Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, previous[signal]));
+            output[signal] = Texture(formats[signal]);
+            pass.BindSampledTexture(NameID(fmt::format("previous{}", names[signal])), sampler, history->GetDefaultView());
+            pass.BindStorageImage(NameID(fmt::format("next{}", names[signal])), output[signal]->GetDefaultView(),
+                                  RDGContentGuarantee::eFullWrite);
+        }
+        for (const char* name : {"rawSky", "rawBounce", "rawBouncePrevious", "rawReflectionPrevious"})
+        {
+            RHITexture* raw = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(0)));
+            pass.BindSampledTexture(name, sampler, raw->GetDefaultView());
+        }
+        // Sparse observations with a wide, valid neighbourhood: clipping must not hide a history rejection.
+        HeapVector<Vec4> samples(Pixels);
+        for (uint32_t index = 0; index < Pixels; ++index)
+        {
+            samples[index] = Vec4(Vec3(index % 2 == 0 ? 0.0f : 2.0f), 1);
+        }
+        RHITexture* raw = Upload(graph, DataFormat::eR32G32B32A32SFloat, samples);
+        pass.BindSampledTexture("rawSpecular", sampler, raw->GetDefaultView());
+        RHITexture* guide = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(.25f, 0, 0, 0)));
+        pass.BindSampledTexture("rawReflection", sampler, guide->GetDefaultView());
+        Dispatch(graph, std::move(pass), Width, Height);
+        RHIBuffer* radianceReadback = ReadColor(graph, output[1]);
+        RHIBuffer* historyReadback  = ReadColor(graph, output[9]);
+        Execute(graph);
+        ASSERT_FALSE(HasFatalFailure());
+        const HeapVector<Vec4> radiance = ReadStaticBuffer<Vec4>(radianceReadback);
+        const HeapVector<Vec4> history  = ReadStaticBuffer<Vec4>(historyReadback);
+        const float length              = scenario == 1 || scenario == 10 ? 101.0f
+                                        : scenario == 15                  ? 32.0f
+                                        : scenario == 0 || scenario == 7 || scenario == 8 || scenario == 9 || scenario == 11 ? 8.0f
+                                                                                                                             : 1.0f;
+        EXPECT_NEAR(history[76].w, length, .002f);
+        EXPECT_NEAR(radiance[76].x, 1.0f - 1.0f / length, .002f);
     }
 }
 
@@ -1295,6 +1384,354 @@ TEST_P(ScreenProbeGatherIntegrationTest, FusedReconstructionMatchesSeparatePasse
             }
         }
     }
+}
+
+// Reduced-resolution reconstruction (hybrid_reconstruct.comp) at divisor two. Scenarios 0 and 3:
+// only one GI texel of the receiver's surface exists, outside the bilinear 4x4 window: in the ring
+// of the 8x8 search window (0), or only in the ring of the 16x16 window (3). Scenarios 1 and 2:
+// every texel is offset 0.002 along the normal, inside the plane limit only when it scales with a
+// view distance of three (rejection.x 0.001).
+TEST_P(ScreenProbeGatherIntegrationTest, ReconstructionSearchesRingAndScalesPlaneLimitWithViewDistance)
+{
+    const uint32_t reducedWidth = (Width + 1) / 2, reducedHeight = (Height + 1) / 2;
+    const uint32_t reducedTexels = reducedWidth * reducedHeight;
+    for (uint32_t scenario = 0; scenario < 4; ++scenario)
+    {
+        SCOPED_TRACE(scenario);
+        RenderGraph graph("ReconstructionSearch");
+        ASSERT_TRUE(graph.Begin());
+        Receivers(graph);
+        hybrid.resolution              = glm::uvec4(Width, Height, 2, 0);
+        hybrid.rejection.x             = .001f;
+        hybrid.bounce.x                = 1;
+        scene.viewPos                  = Vec4(0, 0, scenario == 2 ? .5f : 3.0f, 1);
+        const bool             foreign = scenario == 0 || scenario == 3;
+        HeapVector<Vec4>       positions(reducedTexels, Vec4(0, 0, foreign ? 0.0f : .002f, 1));
+        HeapVector<glm::uvec2> surfaces(reducedTexels, glm::uvec2(0x80008000u, foreign ? 7u : 1u));
+        HeapVector<Vec4>       values(reducedTexels, Vec4(foreign ? 9.0f : .3f, foreign ? 9.0f : .4f, foreign ? 9.0f : .5f, 1));
+        // Receiver (8, 4) reads source (3.5, 1.5) from base texel (3, 1): bilinear window x 2..5,
+        // 8x8 window x 0..7. Texel x 7 lies in the 8x8 ring, x 8 only in the 16x16 ring.
+        const uint32_t ring = 2 * reducedWidth + (scenario == 3 ? 8u : 7u);
+        surfaces[ring].y    = 1;
+        values[ring]        = Vec4(.3f, .4f, .5f, 1);
+        RDGComputePassDesc pass;
+        pass.SetShaderProgramName("HybridReconstructSP");
+        Inputs(pass, false);
+        RHITexture* value = Upload(graph, DataFormat::eR32G32B32A32SFloat, values, reducedWidth, reducedHeight);
+        for (const char* name : {"inputSky", "inputSpecular", "inputBounce"})
+        {
+            pass.BindSampledTexture(name, sampler, value->GetDefaultView());
+        }
+        RHITexture* reducedPosition = Upload(graph, DataFormat::eR32G32B32A32SFloat, positions, reducedWidth, reducedHeight);
+        RHITexture* reducedNormal  = Upload(graph, DataFormat::eR32G32B32A32SFloat,
+                                            HeapVector<Vec4>(reducedTexels, Vec4(.5f, .5f, 0, 0)), reducedWidth, reducedHeight);
+        RHITexture* reducedSurface = Upload(graph, DataFormat::eR32G32UInt, surfaces, reducedWidth, reducedHeight);
+        RHITexture* reducedRoughness = Upload(graph, DataFormat::eR32G32B32A32SFloat,
+                                              HeapVector<Vec4>(reducedTexels, Vec4(0, .5f, 0, 0)), reducedWidth, reducedHeight);
+        pass.BindSampledTexture("reducedPosition", sampler, reducedPosition->GetDefaultView());
+        pass.BindSampledTexture("reducedNormal", sampler, reducedNormal->GetDefaultView());
+        pass.BindSampledTexture("reducedSurface", sampler, reducedSurface->GetDefaultView());
+        pass.BindSampledTexture("reducedRoughness", sampler, reducedRoughness->GetDefaultView());
+        RHITexture* outputs[3] = {Texture(DataFormat::eR16G16B16A16SFloat), Texture(DataFormat::eR16G16B16A16SFloat),
+                                  Texture(DataFormat::eR16G16B16A16SFloat)};
+        pass.BindStorageImage("outputSky", outputs[0]->GetDefaultView(), RDGContentGuarantee::eFullWrite);
+        pass.BindStorageImage("outputSpecular", outputs[1]->GetDefaultView(), RDGContentGuarantee::eFullWrite);
+        pass.BindStorageImage("outputBounce", outputs[2]->GetDefaultView(), RDGContentGuarantee::eFullWrite);
+        pass.BindStorageImage("missingReceiver", Texture(DataFormat::eR8UInt)->GetDefaultView(),
+                              RDGContentGuarantee::eFullWrite);
+        Dispatch(graph, std::move(pass), Width, Height);
+        RHIBuffer* readback[3] = {ReadColor(graph, outputs[0]), ReadColor(graph, outputs[1]), ReadColor(graph, outputs[2])};
+        Execute(graph);
+        ASSERT_FALSE(HasFatalFailure());
+        // A missing receiver keeps zero weight and therefore zero radiance for the fallback pass.
+        const Vec4 expected = scenario == 2 ? Vec4(0) : Vec4(.3f, .4f, .5f, 1);
+        for (uint32_t signal = 0; signal < 3; ++signal)
+        {
+            SCOPED_TRACE(signal);
+            ExpectColor(ReadStaticBuffer<Vec4>(readback[signal])[4 * Width + 8], expected);
+        }
+    }
+}
+
+// When every bilinear history tap belongs to another surface, the diffuse and reflection histories
+// continue from the nearest previous texel of the 4x4 window that passes the same tests. Without
+// such a texel the history restarts.
+TEST_P(ScreenProbeGatherIntegrationTest, HistoryTapSearchContinuesFromNearestPassingTexel)
+{
+    const char* const names[]    = {"Sky",    "Specular", "Moments", "Length",        "Position",
+                                    "Normal", "Receiver", "Bounce",  "BounceMoments", "Reflection"};
+    const DataFormat  formats[]  = {DataFormat::eR32G32B32A32SFloat, DataFormat::eR16G16B16A16SFloat,
+                                    DataFormat::eR32G32B32A32SFloat, DataFormat::eR16G16B16A16SFloat,
+                                    DataFormat::eR32G32B32A32SFloat, DataFormat::eR16G16SFloat,
+                                    DataFormat::eR32G32UInt,         DataFormat::eR32G32B32A32SFloat,
+                                    DataFormat::eR32G32SFloat,       DataFormat::eR32G32B32A32SFloat};
+    const Vec4        previous[] = {Vec4(.5f, .5f, .5f, 1),
+                                    Vec4(.5f, .5f, .5f, 1),
+                                    Vec4(0),
+                                    Vec4(10, 10, 0, .7f),
+                                    Vec4(0, 0, 0, .7f),
+                                    Vec4(.5f, .5f, .5f, .5f),
+                                    Vec4(0),
+                                    Vec4(.5f, .5f, .5f, 10),
+                                    Vec4(0),
+                                    Vec4(.25f, 1, 1, 10)};
+    // Receiver 76 is (8, 4); without motion its bilinear taps are (8..9, 4..5). (8, 3) is blocked
+    // too, so (7, 4) is the only ring texel one texel away.
+    const uint32_t blocked[] = {76, 77, 93, 94, 59};
+    for (uint32_t scenario = 0; scenario < 2; ++scenario)
+    {
+        SCOPED_TRACE(scenario == 0 ? "ring texel continues" : "no passing texel");
+        RenderGraph graph("HistoryTapSearch");
+        ASSERT_TRUE(graph.Begin());
+        Receivers(graph);
+        hybrid.resolution            = glm::uvec4(Width * 4, Height * 4, 4, 0);
+        hybrid.bounce                = glm::uvec4(1, 1, 0, 0);
+        hybrid.previousViewDirection = Vec4(0, 0, 1, 0);
+        hybrid.previousViewPosition  = scene.viewPos;
+        receiver[2] = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(0, .7f, 0, 0)));
+        HeapVector<glm::uvec2> identities(Pixels, glm::uvec2(0x80008000u, scenario == 0 ? 1u : 99u));
+        for (uint32_t pixel : blocked)
+        {
+            identities[pixel].y = 99;
+        }
+        HeapVector<Vec4> sky(Pixels, previous[0]);
+        sky[4 * Width + 7] = Vec4(.25f, .25f, .25f, 1);
+        RDGComputePassDesc pass;
+        pass.SetShaderProgramName("HybridTemporalSP");
+        Inputs(pass, false);
+        RHITexture* output[10]{};
+        for (uint32_t signal = 0; signal < 10; ++signal)
+        {
+            RHITexture* history =
+                signal == 6   ? Upload(graph, DataFormat::eR32G32UInt, identities)
+                : signal == 0 ? Upload(graph, DataFormat::eR32G32B32A32SFloat, sky)
+                              : Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, previous[signal]));
+            output[signal] = Texture(formats[signal]);
+            pass.BindSampledTexture(NameID(fmt::format("previous{}", names[signal])), sampler, history->GetDefaultView());
+            pass.BindStorageImage(NameID(fmt::format("next{}", names[signal])), output[signal]->GetDefaultView(),
+                                  RDGContentGuarantee::eFullWrite);
+        }
+        RHITexture* samples = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(.5f, .5f, .5f, 1)));
+        RHITexture* zero    = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(0)));
+        for (const char* name : {"rawSky", "rawBounce", "rawSpecular"})
+        {
+            pass.BindSampledTexture(name, sampler, samples->GetDefaultView());
+        }
+        for (const char* name : {"rawBouncePrevious", "rawReflectionPrevious"})
+        {
+            pass.BindSampledTexture(name, sampler, zero->GetDefaultView());
+        }
+        RHITexture* guide = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(.25f, 0, 0, 0)));
+        pass.BindSampledTexture("rawReflection", sampler, guide->GetDefaultView());
+        Dispatch(graph, std::move(pass), Width, Height);
+        RHIBuffer* readback[3] = {ReadColor(graph, output[0]), ReadColor(graph, output[7]), ReadColor(graph, output[9])};
+        Execute(graph);
+        ASSERT_FALSE(HasFatalFailure());
+        const Vec4 skyResult  = ReadStaticBuffer<Vec4>(readback[0])[76];
+        const Vec4 bounce     = ReadStaticBuffer<Vec4>(readback[1])[76];
+        const Vec4 reflection = ReadStaticBuffer<Vec4>(readback[2])[76];
+        if (scenario == 0)
+        {
+            // Sky continues the ring texel: (.25 * 10 + .5) / 11.
+            EXPECT_NEAR(skyResult.x, (.25f * 10 + .5f) / 11, 1e-4f);
+            EXPECT_NEAR(bounce.w, 11.0f, .002f);
+            EXPECT_NEAR(reflection.w, 11.0f, .002f);
+        }
+        else
+        {
+            EXPECT_NEAR(skyResult.x, .5f, 1e-4f);
+            EXPECT_NEAR(bounce.w, 1.0f, .002f);
+            EXPECT_NEAR(reflection.w, 1.0f, .002f);
+        }
+    }
+}
+
+// A sample whose history is shorter than four frames is bounded to eight times the luminance of
+// previous texels with history; a receiver that keeps its history blends the same sample unbounded.
+TEST_P(ScreenProbeGatherIntegrationTest, TemporalBoundsOnlySamplesWithoutHistory)
+{
+    const char* const names[]    = {"Sky",    "Specular", "Moments", "Length",        "Position",
+                                    "Normal", "Receiver", "Bounce",  "BounceMoments", "Reflection"};
+    const DataFormat  formats[]  = {DataFormat::eR32G32B32A32SFloat, DataFormat::eR16G16B16A16SFloat,
+                                    DataFormat::eR32G32B32A32SFloat, DataFormat::eR16G16B16A16SFloat,
+                                    DataFormat::eR32G32B32A32SFloat, DataFormat::eR16G16SFloat,
+                                    DataFormat::eR32G32UInt,         DataFormat::eR32G32B32A32SFloat,
+                                    DataFormat::eR32G32SFloat,       DataFormat::eR32G32B32A32SFloat};
+    const Vec4        previous[] = {Vec4(.1f, .1f, .1f, 1),
+                                    Vec4(1),
+                                    Vec4(0),
+                                    Vec4(100, 100, 0, .5f),
+                                    Vec4(0, 0, 0, .5f),
+                                    Vec4(.5f, .5f, 0, 0),
+                                    Vec4(0),
+                                    Vec4(.1f, .1f, .1f, 100),
+                                    Vec4(0),
+                                    Vec4(.25f, 1, 1, 100)};
+    for (uint32_t scenario = 0; scenario < 2; ++scenario)
+    {
+        SCOPED_TRACE(scenario == 0 ? "history kept" : "history rejected");
+        RenderGraph graph("BoundedTemporalSamples");
+        ASSERT_TRUE(graph.Begin());
+        Receivers(graph);
+        hybrid.resolution = glm::uvec4(Width * 4, Height * 4, 4, 0);
+        hybrid.bounce     = glm::uvec4(1, 1, 0, 0);
+        RDGComputePassDesc pass;
+        pass.SetShaderProgramName("HybridTemporalSP");
+        Inputs(pass, false);
+        RHITexture* output[10]{};
+        for (uint32_t signal = 0; signal < 10; ++signal)
+        {
+            RHITexture* history =
+                signal == 6 ? Upload(graph, DataFormat::eR32G32UInt,
+                                     HeapVector<glm::uvec2>(Pixels, glm::uvec2(0x80008000u, scenario == 0 ? 1u : 99u)))
+                            : Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, previous[signal]));
+            output[signal] = Texture(formats[signal]);
+            pass.BindSampledTexture(NameID(fmt::format("previous{}", names[signal])), sampler, history->GetDefaultView());
+            pass.BindStorageImage(NameID(fmt::format("next{}", names[signal])), output[signal]->GetDefaultView(),
+                                  RDGContentGuarantee::eFullWrite);
+        }
+        RHITexture* spark = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(1000, 1000, 1000, 1)));
+        RHITexture* zero  = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(0)));
+        for (const char* name : {"rawSky", "rawBounce"})
+        {
+            pass.BindSampledTexture(name, sampler, spark->GetDefaultView());
+        }
+        for (const char* name : {"rawBouncePrevious", "rawReflectionPrevious", "rawSpecular"})
+        {
+            pass.BindSampledTexture(name, sampler, zero->GetDefaultView());
+        }
+        RHITexture* guide = Upload(graph, DataFormat::eR32G32B32A32SFloat, HeapVector<Vec4>(Pixels, Vec4(.25f, 0, 0, 0)));
+        pass.BindSampledTexture("rawReflection", sampler, guide->GetDefaultView());
+        Dispatch(graph, std::move(pass), Width, Height);
+        RHIBuffer* skyReadback    = ReadColor(graph, output[0]);
+        RHIBuffer* bounceReadback = ReadColor(graph, output[7]);
+        Execute(graph);
+        ASSERT_FALSE(HasFatalFailure());
+        const Vec4 sky    = ReadStaticBuffer<Vec4>(skyReadback)[76];
+        const Vec4 bounce = ReadStaticBuffer<Vec4>(bounceReadback)[76];
+        // Kept: .1 + (1000 - .1) / 101, far above the bound of .8. Rejected: the bound itself.
+        const float expected = scenario == 0 ? .1f + 999.9f / 101.0f : .8f;
+        EXPECT_NEAR(sky.x, expected, expected * 1e-4f);
+        EXPECT_NEAR(bounce.x, expected, expected * 1e-4f);
+        EXPECT_NEAR(bounce.w, scenario == 0 ? 101.0f : 1.0f, .002f);
+    }
+}
+
+static HeapVector<uint64_t> PackHalf(const HeapVector<Vec4>& values)
+{
+    HeapVector<uint64_t> result(values.size());
+    for (size_t index = 0; index < values.size(); ++index)
+    {
+        result[index] = glm::packHalf4x16(values[index]);
+    }
+    return result;
+}
+
+// The shared decisions of forward_material.glsl, hybrid_reconstruct_fallback.comp and the forward
+// bound, evaluated through Calibration/hybrid_reuse_check.comp: whether a decal rests on its
+// receiver (inherits GI) or is lifted (traces), lobe matching for reflection reuse, the sample
+// bound, the fallback receiver's reference (brightest interpolated neighbour, never a missing one)
+// and the forward layer's receiver reference.
+TEST_P(ScreenProbeGatherIntegrationTest, ReuseDecisionsAndBoundReferences)
+{
+    struct ReuseCase
+    {
+        Vec4       fragment;
+        Vec4       receiver;
+        Vec4       receiverNormal;
+        Vec4       lobe;
+        Vec4       layer;
+        Vec4       bound;
+        glm::ivec4 pixel;
+    };
+    static_assert(sizeof(ReuseCase) == 112);
+    ShaderProgramManager::GetInstance().StoreProgram(
+        ZEN_NEW() ComputeFileSP(device, "HybridReuseCheckSP", "VoxelGI/Calibration/hybrid_reuse_check.comp.spv"));
+    const Vec4 z(0, 0, 1, 1);
+    const Vec4 rough(0, 0, 1, .6f), layer(0, 0, 1, 1);
+    // Decal support: resting, lifted, voxel half-voxel support, flipped plane, view-distance scaling.
+    HeapVector<ReuseCase> cases = {
+        {Vec4(0, 0, -.5f, 1), Vec4(0, 0, -.5009f, .01f), z, rough, layer, Vec4(100, 1, 0, 0), glm::ivec4(8, 4, 0, 0)},
+        {Vec4(0, 0, -.5f, 1), Vec4(0, 0, -.502f, .01f), z, rough, layer, Vec4(5, 1, 0, 0), glm::ivec4(8, 4, 0, 0)},
+        {Vec4(0, 0, -.5f, -1), Vec4(0, 0, -.505f, .01f), Vec4(0, 0, 1, 0), rough, layer, Vec4(5, -1, 0, 0),
+         glm::ivec4(8, 4, 0, 0)},
+        {Vec4(0, 0, -.5f, .3f), Vec4(0, 0, -.5001f, .01f), z, rough, layer, Vec4(0, 0, 0, 0), glm::ivec4(8, 4, 0, 0)},
+        {Vec4(0, 0, -3, 1), Vec4(0, 0, -3.002f, .01f), z, rough, layer, Vec4(8, 1, 0, 0), glm::ivec4(8, 4, 0, 0)},
+        // Lobes: broad pair, narrow-to-broad, glossy normal change, rough small normal change.
+        {Vec4(0, 0, -.5f, 1), Vec4(0, 0, -.5f, .01f), z, Vec4(0, 0, 1, .3f), Vec4(0, 0, 1, .9f), Vec4(0),
+         glm::ivec4(8, 4, 0, 0)},
+        {Vec4(0, 0, -.5f, 1), Vec4(0, 0, -.5f, .01f), z, Vec4(.2f, 0, .98f, .1f), Vec4(0, 0, 1, .1f), Vec4(0),
+         glm::ivec4(8, 4, 0, 0)},
+        {Vec4(0, 0, -.5f, 1), Vec4(0, 0, -.5f, .01f), z, Vec4(.3f, 0, .954f, .7f), Vec4(0, 0, 1, .75f), Vec4(0),
+         glm::ivec4(8, 4, 0, 0)}};
+    const bool     rests[]   = {true, false, true, false, true, true, true, true};
+    const bool     lobes[]   = {true, true, true, true, true, false, false, true};
+    const float    scales[]  = {.08f, 1, 1, 1, 1, 1, 1, 1};
+    const uint32_t caseCount = static_cast<uint32_t>(cases.size());
+    RenderGraph    graph("ReuseDecisions");
+    ASSERT_TRUE(graph.Begin());
+    Receivers(graph);
+    hybrid.bounce.x = 1;
+    // Interpolated outputs: luminance grows with x; (16, 4) is the brightest but a missing receiver.
+    HeapVector<Vec4>    sky(Pixels), specular(Pixels), bounce(Pixels);
+    HeapVector<uint8_t> missing(Pixels, 0);
+    for (uint32_t index = 0; index < Pixels; ++index)
+    {
+        const float x   = float(index % Width);
+        sky[index]      = Vec4(Vec3(.01f * x), 1);
+        bounce[index]   = Vec4(Vec3(.02f * x), 1);
+        specular[index] = Vec4(Vec3(.03f * x), 1);
+    }
+    missing[4 * Width + 16] = 1;
+    RHITexture* outputs[3]  = {Upload(graph, DataFormat::eR16G16B16A16SFloat, PackHalf(sky)),
+                               Upload(graph, DataFormat::eR16G16B16A16SFloat, PackHalf(specular)),
+                               Upload(graph, DataFormat::eR16G16B16A16SFloat, PackHalf(bounce))};
+    // The forward reference samples its own copies: a pass cannot sample its storage images.
+    RHITexture* sampled[3] = {Upload(graph, DataFormat::eR16G16B16A16SFloat, PackHalf(sky)),
+                              Upload(graph, DataFormat::eR16G16B16A16SFloat, PackHalf(specular)),
+                              Upload(graph, DataFormat::eR16G16B16A16SFloat, PackHalf(bounce))};
+    RHIBuffer*  input      = Buffer(caseCount * sizeof(ReuseCase), RHIBufferAllocateType::eCPUWrite, cases.data());
+    graph.GetResourceManager()->ImportHostWrittenBuffer(input);
+    RHIBuffer*         output = Buffer(caseCount * 3 * sizeof(Vec4), RHIBufferAllocateType::eGPU);
+    RDGComputePassDesc pass;
+    pass.SetShaderProgramName("HybridReuseCheckSP");
+    pass.BindValue("uHybridData", hybrid);
+    const char* const names[] = {"receiverDepth",   "receiverNormal", "receiverRoughness",
+                                 "receiverSurface", "receiverMotion", "receiverPosition"};
+    for (uint32_t index = 0; index < 6; ++index)
+    {
+        pass.BindSampledTexture(names[index], sampler, receiver[index]->GetDefaultView());
+    }
+    pass.BindSampledTexture("missingReceiver", sampler, Upload(graph, DataFormat::eR8UInt, missing)->GetDefaultView());
+    pass.BindStorageImage("outputSky", outputs[0]->GetDefaultView());
+    pass.BindStorageImage("outputSpecular", outputs[1]->GetDefaultView());
+    pass.BindStorageImage("outputBounce", outputs[2]->GetDefaultView());
+    pass.BindSampledTexture("hybridSky", sampler, sampled[0]->GetDefaultView());
+    pass.BindSampledTexture("hybridSpecular", sampler, sampled[1]->GetDefaultView());
+    pass.BindSampledTexture("hybridBounce", sampler, sampled[2]->GetDefaultView());
+    pass.BindSampledTexture("hybridSurface", sampler, receiver[3]->GetDefaultView());
+    pass.BindSampledTexture("hybridDepth", sampler, receiver[0]->GetDefaultView());
+    pass.BindStorageBuffer("ReuseCases", input);
+    pass.BindStorageBuffer("ReuseResults", output, RDGContentGuarantee::eFullWrite);
+    graph.AddComputePass(std::move(pass)).RecordPassCommands([](RDGPassCmdEncoder& encoder) { encoder.Dispatch(1, 1, 1); });
+    RHIBuffer* readback = ReadBuffer(graph, output);
+    Execute(graph);
+    ASSERT_FALSE(HasFatalFailure());
+    const HeapVector<Vec4> results = ReadStaticBuffer<Vec4>(readback);
+    for (uint32_t index = 0; index < caseCount; ++index)
+    {
+        SCOPED_TRACE(index);
+        EXPECT_EQ(results[index * 3].x, rests[index] ? 1.0f : 0.0f);
+        EXPECT_EQ(results[index * 3].y, lobes[index] ? 1.0f : 0.0f);
+        EXPECT_NEAR(results[index * 3].z, scales[index], 1e-6f);
+    }
+    // Fallback reference at (8, 4): stride-4 neighbours x 0..16, y 0..8 in view, excluding the
+    // background (0, 0), the empty receiver (1, 0) is not on the grid, and the missing (16, 4):
+    // the brightest is x 16 at y 0 or 8. Luminance of a grey value equals the value.
+    ExpectColor(results[1], Vec4(.16f, .32f, .48f, 0));
+    // Forward receiver reference at (8, 4): mean of the 3x3 receivers at x 4, 8, 12 = luminance at x 8.
+    // The background (0, 0) is outside this grid; missing receivers are interpolated here as well.
+    ExpectColor(results[2], Vec4(.08f + .16f, .24f, .08f, .24f));
 }
 
 INSTANTIATE_TEST_SUITE_P(SubmissionModes, ScreenProbeGatherIntegrationTest, testing::Values(0u, 1u, 2u, 3u));
