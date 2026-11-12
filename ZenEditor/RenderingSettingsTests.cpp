@@ -121,6 +121,29 @@ TEST(RenderingSettings, ResourcesRequireApplyButScalarsDoNot)
     EXPECT_EQ(state.GetApplied().gi.resolution, 64u);
 }
 
+TEST(RenderingSettings, NormalMapToggleIsALiveEdit)
+{
+    EditorRenderingState state;
+
+    state.Initialize({});
+
+    rc::RenderingSettings draft = state.GetDraft();
+
+    ASSERT_TRUE(draft.normalMaps);
+
+    draft.normalMaps = false;
+
+    ASSERT_TRUE(state.Stage(draft));
+
+    EXPECT_FALSE(state.NeedsResourceApply());
+
+    EXPECT_FALSE(state.GetPreview().normalMaps);
+
+    state.CommitPreview();
+
+    EXPECT_FALSE(state.GetApplied().normalMaps);
+}
+
 TEST(RenderingSettings, PreviewPublishesEditsWhileResourceChangesWaitForApply)
 {
     EditorRenderingState state;

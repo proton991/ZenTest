@@ -6,6 +6,19 @@ void CreateHybridTestShaders(RenderDevice* device)
          {std::array<const char*, 2>{"HybridTraceHardwareSP", "VoxelGI/hybrid_trace_hardware.comp.spv"},
           {"HybridTraceHardwareCountsSP", "VoxelGI/hybrid_trace_hardware_counts.comp.spv"},
           {"HybridTraceReSTIRHardwareSP", "VoxelGI/hybrid_trace_restir_hardware.comp.spv"},
+          {"HybridTraceBufferedFieldSP", "VoxelGI/hybrid_trace_buffered_field.comp.spv"},
+          {"HybridTraceBufferedFieldNoGuideSP", "VoxelGI/hybrid_trace_buffered_field.comp.noguide.spv"},
+          {"HybridTraceHardwareBufferedSP", "VoxelGI/hybrid_trace_hardware_buffered.comp.spv"},
+          {"HybridTraceHardwareBufferedNoGuideSP", "VoxelGI/hybrid_trace_hardware_buffered.comp.noguide.spv"},
+          {"HybridTraceHardwareBufferedFieldSP", "VoxelGI/hybrid_trace_hardware_buffered_field.comp.spv"},
+          {"HybridTraceHardwareBufferedFieldNoGuideSP", "VoxelGI/hybrid_trace_hardware_buffered_field.comp.noguide.spv"},
+          {"HybridTraceReSTIRHardwareBufferedSP", "VoxelGI/hybrid_trace_restir_hardware_buffered.comp.spv"},
+          {"HybridTraceReSTIRHardwareBufferedNoGuideSP", "VoxelGI/hybrid_trace_restir_hardware_buffered.comp.noguide.spv"},
+          {"HybridTraceReSTIRHardwareBufferedFieldSP", "VoxelGI/hybrid_trace_restir_hardware_buffered_field.comp.spv"},
+          {"HybridTraceReSTIRHardwareBufferedFieldNoGuideSP",
+           "VoxelGI/hybrid_trace_restir_hardware_buffered_field.comp.noguide.spv"},
+          {"HybridGuidePrepareSP", "VoxelGI/hybrid_guide_prepare.comp.spv"},
+          {"HybridGuideFinishSP", "VoxelGI/hybrid_guide_finish.comp.spv"},
           {"ReSTIRTemporalSP", "VoxelGI/restir_temporal.comp.spv"},
           {"ReSTIRSpatialSP", "VoxelGI/restir_spatial.comp.spv"},
           {"LightOccludersCountsSP", "ShadowMapping/light_occluders_counts.comp.spv"},
@@ -441,6 +454,9 @@ TEST_F(RenderCoreTest, HybridHistoriesPublishOnlySuccessfulFramesAndResizePerVie
                     dispatch.first != nullptr
                         ? dispatch.first->GetCreateInfo().spirvFileName[ToUnderlying(RHIShaderStage::eCompute)]
                         : std::string();
+                // This scene stays lit: buffered environment guides remain an explicit experiment.
+                EXPECT_NE(shader, "VoxelGI/hybrid_guide_prepare.comp.spv");
+                EXPECT_NE(shader, "VoxelGI/hybrid_guide_finish.comp.spv");
                 if (shader == "VoxelGI/hybrid_temporal_reference.comp.spv")
                 {
                     EXPECT_EQ(dispatch.second, glm::uvec3((view.width + 7u) / 8u, (view.height + 7u) / 8u, 1u));
@@ -450,6 +466,12 @@ TEST_F(RenderCoreTest, HybridHistoriesPublishOnlySuccessfulFramesAndResizePerVie
                 if (shader == "VoxelGI/hybrid_trace_field.comp.spv" || shader == "VoxelGI/hybrid_trace_counts_field.comp.spv")
                 {
                     EXPECT_EQ(dispatch.second, guideGroups);
+                    ++fullTraces;
+                }
+                if ((shader == "VoxelGI/hybrid_trace_buffered_field.comp.spv"
+                     || shader == "VoxelGI/hybrid_trace_buffered_field.comp.noguide.spv"))
+                {
+                    EXPECT_EQ(dispatch.second, glm::uvec3((view.width + 7u) / 8u, (view.height + 7u) / 8u, 1u));
                     ++fullTraces;
                 }
                 if (shader == "VoxelGI/hybrid_trace_half_field.comp.spv"
@@ -833,7 +855,9 @@ TEST_F(RenderCoreTest, ScreenProbeHistoriesSurviveDeclinesAndResetAcrossGatherCh
                 const std::pair<RHIShader*, glm::uvec3>& dispatch = rhi->graphics.dispatches[index];
                 ASSERT_NE(dispatch.first, nullptr);
                 const std::string file = dispatch.first->GetCreateInfo().spirvFileName[ToUnderlying(RHIShaderStage::eCompute)];
-                if (file == "VoxelGI/hybrid_trace_field.comp.spv" || file == "VoxelGI/hybrid_trace_counts_field.comp.spv")
+                if (file == "VoxelGI/hybrid_trace_field.comp.spv" || file == "VoxelGI/hybrid_trace_counts_field.comp.spv"
+                    || (file == "VoxelGI/hybrid_trace_buffered_field.comp.spv"
+                        || file == "VoxelGI/hybrid_trace_buffered_field.comp.noguide.spv"))
                 {
                     ++pixelTraces;
                 }

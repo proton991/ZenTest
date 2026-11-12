@@ -180,8 +180,8 @@ TEST(VoxelGIRuntimeSettings, AdaptiveBudgetIsIndependentOfTraversalBackend)
 
 TEST(VoxelGIRuntimeSettings, ReferenceSamplesAcceptOnlyTheDiagnosticBudgets)
 {
-    // 256 x 256 frames splits the 1024 x 64 tier reference into frames below the GPU watchdog.
-    for (uint32_t samples : {0u, 256u, 1024u, 4096u})
+    // Smaller reference batches keep high-resolution dispatches below the GPU watchdog.
+    for (uint32_t samples : {0u, 64u, 256u, 1024u, 4096u})
     {
         VoxelGISettings settings;
         settings.referenceSamples = samples;
