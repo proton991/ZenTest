@@ -306,7 +306,9 @@ TEST_P(VulkanPresentationReviewTest, RendererInitializationWarmsRegisteredComput
     const HeapVector<NameID>&  warmups = programs.GetInitializationWarmups();
     const PipelineCacheMetrics warmed  = device->GetPipelineCacheMetrics();
     const bool                 culling = SupportsGBufferCulling(device->GetGPUInfo());
-    EXPECT_EQ(warmups.size(), culling ? 4u : 3u);
+    // Voxel debug-view programs, plus G-buffer culling where supported. The GI denoiser's programs
+    // run from the first GI frame, so none waits for warm-up (the removed HybridTemporalSP did).
+    EXPECT_EQ(warmups.size(), culling ? 3u : 2u);
     EXPECT_EQ(std::find(warmups.begin(), warmups.end(), NameID("SceneFrustumCullSP")) != warmups.end(), culling);
     EXPECT_EQ(warmed.creations, warmups.size());
     for (NameID name : warmups)

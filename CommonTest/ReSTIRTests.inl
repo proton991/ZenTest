@@ -71,7 +71,7 @@ TEST_P(ConeVoxelGIIntegrationTest, ReSTIRGGXLobePreservesNormalizedReflectionEne
     RDGComputePassDesc check;
     check.SetShaderProgramName("ReSTIRLobeCheckSP");
     check.SetQueuePreference(RDGQueuePreference::ePreferAsyncCompute);
-    check.BindValue("uReSTIRData", glm::uvec4(0));
+    check.BindValue("uReSTIRData", ReSTIRUniformData{});
     check.BindSampledTexture("restirLobeIntegral", sampler, integral->GetDefaultView());
     check.BindStorageBuffer("Results", output, RDGContentGuarantee::eFullWrite);
     graph.AddComputePass(std::move(check)).RecordPassCommands([](RDGPassCmdEncoder& encoder) { encoder.Dispatch(16, 1, 1); });

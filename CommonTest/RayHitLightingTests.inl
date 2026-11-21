@@ -4,6 +4,18 @@ TEST_P(RayQueryIntegrationTest, HitLightingUsesActualMaterialsAndRTVisibilityOut
     {
         ShaderProgramManager::GetInstance().StoreProgram(
             ZEN_NEW() ComputeFileSP(device, "RayHitLightingCheckSP", "VoxelGI/Calibration/ray_hit_lighting_check.comp.spv"));
+        if (SupportsHybridRayTracingPipeline(device->GetGPUInfo()))
+        {
+            const HeapVector<ShaderProgram::StageFile> modules = {
+                {RHIShaderStage::eRayGeneration, "VoxelGI/Calibration/ray_hit_lighting_check.rgen.spv"},
+                {RHIShaderStage::eMiss, "VoxelGI/ray_radiance.rmiss.spv"},
+                {RHIShaderStage::eMiss, "VoxelGI/ray_shadow.rmiss.spv"},
+                {RHIShaderStage::eClosestHit, "VoxelGI/hybrid_hit.rchit.spv"},
+                {RHIShaderStage::eAnyHit, "VoxelGI/ray_alpha_radiance.rahit.spv"},
+                {RHIShaderStage::eAnyHit, "VoxelGI/ray_alpha.rahit.spv"}};
+            ShaderProgramManager::GetInstance().StoreProgram(ZEN_NEW()
+                                                                 RayTracingFileSP(device, "RayHitPipelineCheckSP", modules));
+        }
         sg::Scene source;
         source.GetAABB() = sg::AABB(Vec3(-1), Vec3(3, 1, 1));
         asset::Vertex                   vertices[9]{};
@@ -79,14 +91,18 @@ TEST_P(RayQueryIntegrationTest, HitLightingUsesActualMaterialsAndRTVisibilityOut
                    BitField<RHIBufferUsageFlagBits>(RHIBufferUsageFlagBits::eStorageBuffer), zeros.data());
         BitField<RHIBufferUsageFlagBits> outputUsage;
         outputUsage.SetFlags(RHIBufferUsageFlagBits::eStorageBuffer, RHIBufferUsageFlagBits::eTransferSrcBuffer);
-        RHIBuffer* output = Buffer(2 * sizeof(Vec4), outputUsage, nullptr, RHIBufferAllocateType::eGPU);
+        RHIBuffer* output = Buffer(4 * sizeof(Vec4), outputUsage, nullptr, RHIBufferAllocateType::eGPU);
         RHIBuffer* readback =
-            Buffer(2 * sizeof(Vec4), BitField<RHIBufferUsageFlagBits>(RHIBufferUsageFlagBits::eTransferDstBuffer), nullptr,
+            Buffer(4 * sizeof(Vec4), BitField<RHIBufferUsageFlagBits>(RHIBufferUsageFlagBits::eTransferDstBuffer), nullptr,
                    RHIBufferAllocateType::eCPURead);
-        RHISampler* sampler = device->CreateSampler({});
-        for (uint32_t scenario = 0; scenario < 6; ++scenario)
+        RHISampler*      sampler = device->CreateSampler({});
+        HeapVector<Vec4> queryResults(12);
+        for (uint32_t iteration = 0; iteration < (SupportsHybridRayTracingPipeline(device->GetGPUInfo()) ? 12u : 6u);
+             ++iteration)
         {
-            SCOPED_TRACE(scenario);
+            SCOPED_TRACE(iteration);
+            const uint32_t scenario = iteration % 6;
+            const bool     pipeline = iteration >= 6;
             ASSERT_TRUE(scene.SetInstanceEnabled(2, scenario == 1 || scenario == 2 || scenario == 4));
             const Mat4 transform = scenario == 2 ? glm::translate(Mat4(1), Vec3(-0.5f, 0, 0))
                                  : scenario == 4
@@ -94,10 +110,9 @@ TEST_P(RayQueryIntegrationTest, HitLightingUsesActualMaterialsAndRTVisibilityOut
                                            * glm::translate(Mat4(1), Vec3(-0.5f, 0, -0.5f))
                                      : Mat4(1);
             ASSERT_TRUE(scene.SetInstanceTransform(2, transform));
-            if (scenario == 5)
             {
                 sg::MaterialData material = source.GetComponents<sg::Material>()[0]->data;
-                material.baseColorFactor  = Vec4(0, 0, 1, 1);
+                material.baseColorFactor  = Vec4(scenario == 5 ? Vec3(0, 0, 1) : colors[0], 1);
                 ASSERT_TRUE(scene.UpdateMaterial(0, material));
             }
             ASSERT_TRUE(scene.Update());
@@ -129,8 +144,11 @@ TEST_P(RayQueryIntegrationTest, HitLightingUsesActualMaterialsAndRTVisibilityOut
             lighting.lights[0].directionType  = Vec4(0, 0, -1, scenario == 2 ? 0 : 1);
             lighting.lights[0].colorIntensity = Vec4(Vec3(1), glm::pi<float>() * (scenario == 2 ? 1 : std::sqrt(8.0f)));
             lighting.lights[0].coneShadow.z   = 1;
-            RDGComputePassDesc pass;
-            pass.SetShaderProgramName("RayHitLightingCheckSP");
+            RDGComputePassDesc    compute;
+            RDGRayTracingPassDesc rays;
+            RDGDispatchPassDesc&  pass =
+                pipeline ? static_cast<RDGDispatchPassDesc&>(rays) : static_cast<RDGDispatchPassDesc&>(compute);
+            pass.SetShaderProgramName(pipeline ? "RayHitPipelineCheckSP" : "RayHitLightingCheckSP");
             pass.SetQueuePreference(RDGQueuePreference::ePreferAsyncCompute);
             pass.BindValue("uGISettings", gi);
             pass.BindValue("uSceneData", lighting);
@@ -142,10 +160,26 @@ TEST_P(RayQueryIntegrationTest, HitLightingUsesActualMaterialsAndRTVisibilityOut
             }
             pass.BindSampledTexture("coneEnvironmentMap", sampler, environment->GetDefaultView());
             pass.BindStorageBuffer("Results", output, RDGContentGuarantee::eFullWrite);
-            graph.AddComputePass(std::move(pass)).RecordPassCommands([](RDGPassCmdEncoder& encoder) {
-                encoder.Dispatch(2, 1, 1);
-            });
-            graph.AddTransferPass("ReadHitLighting").CopyBuffer(output, readback, {0, 0, 2 * sizeof(Vec4)}).NeverCull();
+            if (pipeline)
+            {
+                rays.SetShaderGroups(
+                    {{RHIRayTracingShaderGroupType::eRayGeneration, 0},
+                     {RHIRayTracingShaderGroupType::eMiss, 1},
+                     {RHIRayTracingShaderGroupType::eMiss, 2},
+                     {RHIRayTracingShaderGroupType::eHit, kUnusedRayTracingShader, 3, 4},
+                     {RHIRayTracingShaderGroupType::eHit, kUnusedRayTracingShader, kUnusedRayTracingShader, 5}},
+                    2);
+                graph.AddRayTracingPass(std::move(rays)).RecordPassCommands([](RDGPassCmdEncoder& encoder) {
+                    encoder.TraceRays(2, 1, 1);
+                });
+            }
+            else
+            {
+                graph.AddComputePass(std::move(compute)).RecordPassCommands([](RDGPassCmdEncoder& encoder) {
+                    encoder.Dispatch(2, 1, 1);
+                });
+            }
+            graph.AddTransferPass("ReadHitLighting").CopyBuffer(output, readback, {0, 0, 4 * sizeof(Vec4)}).NeverCull();
             ASSERT_TRUE(graph.End()) << graph.GetResult().message;
             const bool succeeded = device->ExecuteRenderGraph(graph);
             queries.OnRenderGraphExecuted(succeeded ? RenderFrameResult::eSubmitted : RenderFrameResult::eFailed);
@@ -161,8 +195,19 @@ TEST_P(RayQueryIntegrationTest, HitLightingUsesActualMaterialsAndRTVisibilityOut
                 for (uint32_t component = 0; component < 3; ++component)
                 {
                     EXPECT_NEAR(values[receiver][component], expected[component], 2e-4f);
+                    if (pipeline)
+                    {
+                        EXPECT_FLOAT_EQ(values[receiver][component], queryResults[scenario * 2 + receiver][component]);
+                    }
                 }
                 EXPECT_EQ(values[receiver].w, float(receiver));
+                // Visibility rays after a shaded primary must retain their independent payload.
+                EXPECT_EQ(values[receiver + 2u],
+                          Vec4(1, scenario == 4 || (scenario == 2 && receiver == 0) ? 1.0f : 0.0f, 0, 1));
+                if (!pipeline)
+                {
+                    queryResults[scenario * 2 + receiver] = values[receiver];
+                }
             }
             readback->Unmap();
         }

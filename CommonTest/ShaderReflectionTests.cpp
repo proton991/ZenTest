@@ -320,15 +320,6 @@ TEST(ShaderReflectionTests, ComputeVoxelizerBindingsMatchProducerAndConsumerAcce
 
 TEST(ShaderReflectionTests, VoxelAtomicAndRadianceWritesRemainWritable)
 {
-    const RHIShaderGroupInfo geometry = ReflectStage(RHIShaderStage::eFragment, "VoxelGI/voxelization.frag.spv");
-
-    ExpectWritable(geometry, "voxelOwner", true);
-
-    for (NameID name : {"voxelNormal", "voxelEmissive", "staticVoxelFlag"})
-    {
-        EXPECT_EQ(FindBinding(geometry, name), nullptr);
-    }
-
     const RHIShaderGroupInfo inject = ReflectStage(RHIShaderStage::eCompute, "VoxelGI/inject_radiance.comp.spv");
 
     ExpectWritable(inject, "voxelNormal", false);
@@ -341,11 +332,9 @@ TEST(ShaderReflectionTests, VoxelAtomicAndRadianceWritesRemainWritable)
     // and only read by the trace.
     ExpectWritable(ReflectStage(RHIShaderStage::eCompute, "VoxelGI/voxelization.comp.spv"), "voxelClassOwner", true);
 
-    ExpectWritable(geometry, "voxelClassOwner", true);
-
     ExpectWritable(ReflectStage(RHIShaderStage::eCompute, "VoxelGI/clear_owners.comp.spv"), "voxelClassOwner", true);
 
-    const RHIShaderGroupInfo meshInject = ReflectStage(RHIShaderStage::eCompute, "VoxelGI/inject_hardware_radiance.comp.spv");
+    const RHIShaderGroupInfo meshInject = ReflectStage(RHIShaderStage::eCompute, "VoxelGI/inject_mesh_radiance.comp.spv");
 
     ExpectWritable(meshInject, "voxelClassOwner", false);
 
@@ -355,10 +344,9 @@ TEST(ShaderReflectionTests, VoxelAtomicAndRadianceWritesRemainWritable)
     ExpectWritable(inject, "LightVisibilityCache", true);
 
     const RHIShaderGroupInfo hardwareTrace = ReflectStage(RHIShaderStage::eCompute, "VoxelGI/hybrid_trace_hardware.comp.spv");
-    const RHIShaderGroupInfo fieldTrace =
-        ReflectStage(RHIShaderStage::eCompute, "VoxelGI/hybrid_trace_hardware_field.comp.spv");
+    const RHIShaderGroupInfo fieldTrace    = ReflectStage(RHIShaderStage::eCompute, "VoxelGI/hybrid_trace_field.comp.spv");
 
-    // Pure HW hit lighting has no voxel cache; mixed HW/field tracing still reads it.
+    // HW hit lighting has no voxel cache; Compute field tracing reads it.
     for (NameID name : {"HitLightCache", "HitLightCachePrevious", "hitReflectance"})
     {
         EXPECT_EQ(FindBinding(hardwareTrace, name), nullptr);
@@ -419,6 +407,46 @@ void ExpectAccess(const RHIShaderGroupInfo& info, NameID name, bool readable, bo
     EXPECT_EQ(binding->writable, writable);
 }
 } // namespace
+
+TEST(ShaderReflectionTests, RayTracingStageMustMatchTheModuleExecutionModel)
+{
+    RHIShaderGroupSPIRVPtr spirv = MakeRefCountPtr<RHIShaderGroupSPIRV>();
+    spirv->SetStageSPIRV(RHIShaderStage::eMiss, LoadReflectionFixture("rt_shared.rgen.spv"));
+    RHIShaderGroupInfo output{};
+    EXPECT_FALSE(RHIShaderUtil::ReflectShaderGroupInfo(spirv, kNoDeviceSetLimit, output));
+    EXPECT_TRUE(output.SRDTable.empty());
+}
+
+TEST(ShaderReflectionTests, RayTracingDescriptorsMergeEveryStageAndMultipleMissModules)
+{
+    RHIShaderGroupSPIRVPtr spirv    = MakeRefCountPtr<RHIShaderGroupSPIRV>();
+    const RHIShaderStage   stages[] = {RHIShaderStage::eRayGeneration, RHIShaderStage::eMiss, RHIShaderStage::eClosestHit,
+                                       RHIShaderStage::eAnyHit, RHIShaderStage::eCallable};
+    const char*            paths[] = {"rt_shared.rgen.spv", "rt_shared.rmiss.spv", "rt_shared.rchit.spv", "rt_shared.rahit.spv",
+                                      "rt_shared.rcall.spv"};
+    BitField<RHIShaderStageFlagBits> allStages;
+    for (uint32_t index = 0; index < std::size(stages); ++index)
+    {
+        spirv->AppendStageSPIRV(stages[index], LoadReflectionFixture(paths[index]));
+        allStages.SetFlag(RHIShaderStageToFlagBits(stages[index]));
+    }
+    spirv->AppendStageSPIRV(RHIShaderStage::eMiss, LoadReflectionFixture("rt_secondary.rmiss.spv"));
+    RHIShaderGroupInfo info;
+    ASSERT_TRUE(RHIShaderUtil::ReflectShaderGroupInfo(spirv, kNoDeviceSetLimit, info));
+    const RHIShaderResourceDescriptor* shared    = FindBinding(info, "RTShared");
+    const RHIShaderResourceDescriptor* output    = FindBinding(info, "RTOutput");
+    const RHIShaderResourceDescriptor* secondary = FindBinding(info, "RTSecondary");
+    ASSERT_NE(shared, nullptr);
+    ASSERT_NE(output, nullptr);
+    ASSERT_NE(secondary, nullptr);
+    EXPECT_EQ(shared->stageFlags, allStages);
+    EXPECT_EQ(output->stageFlags, BitField<RHIShaderStageFlagBits>(RHIShaderStageFlagBits::eRayGeneration));
+    EXPECT_EQ(secondary->stageFlags, BitField<RHIShaderStageFlagBits>(RHIShaderStageFlagBits::eMiss));
+    EXPECT_EQ(secondary->binding, 2u);
+    EXPECT_TRUE(shared->readable);
+    EXPECT_FALSE(shared->writable);
+    EXPECT_TRUE(output->writable);
+}
 
 TEST(ShaderReflectionTests, SharedSpecializationIdsMergeStagesAndKeepNewConstants)
 {
@@ -655,17 +683,11 @@ TEST(ShaderReflectionTests, VoxelWriteOnlyBindingsRetainPartialWriteSemantics)
     ExpectAccess(ReflectStage(RHIShaderStage::eCompute, "VoxelGI/reset_voxel_texture.comp.spv"), "voxelTexture", false, true);
 }
 
-TEST(ShaderReflectionTests, GeometryVoxelizationKeepsTheFullSceneVertexStride)
+TEST(ShaderReflectionTests, GBufferKeepsTheFullSceneVertexStride)
 {
-    const RHIShaderGroupInfo voxel   = ReflectStage(RHIShaderStage::eVertex, "VoxelGI/voxelization.vert.spv");
-
     const RHIShaderGroupInfo gbuffer = ReflectStage(RHIShaderStage::eVertex, "SceneRenderer/offscreen.vert.spv");
 
-    EXPECT_EQ(voxel.vertexBindingStride, sizeof(asset::Vertex));
-
     EXPECT_EQ(gbuffer.vertexBindingStride, sizeof(asset::Vertex));
-
-    EXPECT_EQ(voxel.pushConstants.size, 4u * sizeof(uint32_t));
 }
 
 TEST(ShaderReflectionTests, SceneShadowsKeepTheMeshVertexLayoutAndUniformContract)
@@ -721,12 +743,8 @@ TEST(ShaderReflectionTests, HybridForwardLayersReadDeferredReceiverVisibility)
 
     // Hybrid layers reuse exact shadow-map visibility as well as hardware shadow rays.
     // Ordinary forward materials do not consume the deferred receiver's visibility.
-    for (const char* path : {"SceneRenderer/forward_material.frag.spv", "SceneRenderer/forward_material_voxel.frag.spv"})
-    {
-        SCOPED_TRACE(path);
-        const RHIShaderGroupInfo info = ReflectStage(RHIShaderStage::eFragment, path);
-        EXPECT_EQ(FindBinding(info, "receiverLightVisibility"), nullptr);
-    }
+    const RHIShaderGroupInfo info = ReflectStage(RHIShaderStage::eFragment, "SceneRenderer/forward_material.frag.spv");
+    EXPECT_EQ(FindBinding(info, "receiverLightVisibility"), nullptr);
 }
 
 // Deferred lighting writes the receivers' shadow-ray results to color location 1 only in the
@@ -1082,6 +1100,26 @@ RHIShaderStage ShippedShaderStage(const std::filesystem::path& source)
     else if (extension == ".geom")
     {
         stage = RHIShaderStage::eGeometry;
+    }
+    else if (extension == ".rgen")
+    {
+        stage = RHIShaderStage::eRayGeneration;
+    }
+    else if (extension == ".rmiss")
+    {
+        stage = RHIShaderStage::eMiss;
+    }
+    else if (extension == ".rchit")
+    {
+        stage = RHIShaderStage::eClosestHit;
+    }
+    else if (extension == ".rahit")
+    {
+        stage = RHIShaderStage::eAnyHit;
+    }
+    else if (extension == ".rcall")
+    {
+        stage = RHIShaderStage::eCallable;
     }
     return stage;
 }

@@ -1,3 +1,11 @@
+// Layout consumed only by the retained occupancy-traversal calibration shader.
+struct CalibrationVisibilityBounds
+{
+    Vec4 minimum;
+    Vec4 maximum;
+};
+static_assert(sizeof(CalibrationVisibilityBounds) == 32);
+
 struct ConeVisibilityRay
 {
     Vec4 origin;
@@ -173,8 +181,8 @@ TEST_P(ConeVoxelGIIntegrationTest, ConeVisibilityPreservesScalarHitsAndFiniteSeg
                            VoxelGIUniformData{Vec4(0, 0, 0, 1), Vec4(side, 1.0f / side, 1, 1), Vec4(1), Vec4(6, 128, 1, 0)});
 
             pass.BindValue("uGIVisibilityBounds",
-                           bounded ? VoxelGIVisibilityBounds{Vec4(0, 1, 1, 0), Vec4(side, side / 2.0f, side / 2.0f, 0)}
-                                   : VoxelGIVisibilityBounds{Vec4(0), Vec4(Vec3(side), 0)});
+                           bounded ? CalibrationVisibilityBounds{Vec4(0, 1, 1, 0), Vec4(side, side / 2.0f, side / 2.0f, 0)}
+                                   : CalibrationVisibilityBounds{Vec4(0), Vec4(Vec3(side), 0)});
 
             pass.BindValue("uSceneData", SceneUniformData{});
 

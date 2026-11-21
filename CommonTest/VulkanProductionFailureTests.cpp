@@ -446,6 +446,62 @@ TEST(VulkanProductionFailureTest, MemoryBudgetReportsNativeHeapsWhenSupported)
     }
 }
 
+// The diagnostic limit emulates a smaller GPU (an 8 GB card) on a larger one: device-local heaps,
+// their budgets and the allocator's capacity all stop at it, so budget-driven choices see that device.
+TEST(VulkanProductionFailureTest, DeviceMemoryLimitCapsHeapsBudgetsAndAllocations)
+{
+    test::VulkanSession session;
+    const bool          memoryBudget = session.rhi.GetDevice()->GetExtensionFlags().hasMemoryBudget != 0;
+    const uint64_t      eightGB      = 8ull * 1024 * 1024 * 1024;
+    {
+        RHIOptions::GetInstance().SetDeviceMemoryLimit(eightGB);
+        VulkanMemoryAllocator allocator;
+        allocator.Init(session.rhi.GetInstance(), session.rhi.GetDevice()->GetPhysicalDeviceHandle(), session.rhi.GetVkDevice(),
+                       false, memoryBudget);
+        RHIOptions::GetInstance().SetDeviceMemoryLimit(0);
+        const RHIGPUMemoryStats stats = allocator.GetGPUMemoryStats();
+        EXPECT_EQ(stats.budgetAvailable, memoryBudget);
+        for (uint32_t i = 0; i < stats.heapCount; ++i)
+        {
+            if (stats.heaps[i].deviceLocal)
+            {
+                EXPECT_LE(stats.heaps[i].sizeBytes, eightGB) << i;
+                EXPECT_LE(stats.heaps[i].budgetBytes, eightGB) << i;
+            }
+        }
+    }
+
+    // A small limit shows the cap is enforced: device-local commitments stop at it. Like a full card,
+    // an allocation that prefers device memory may then fail or be placed in host memory.
+    const uint64_t limit = 256ull * 1024 * 1024;
+    RHIOptions::GetInstance().SetDeviceMemoryLimit(limit);
+    VulkanMemoryAllocator allocator;
+    allocator.Init(session.rhi.GetInstance(), session.rhi.GetDevice()->GetPhysicalDeviceHandle(), session.rhi.GetVkDevice(),
+                   false);
+    RHIOptions::GetInstance().SetDeviceMemoryLimit(0);
+    VulkanMemoryAllocator* original = GVkMemAllocator;
+    GVkMemAllocator                 = &allocator;
+    RHIBufferCreateInfo info{};
+    info.size         = limit / 2;
+    info.allocateType = RHIBufferAllocateType::eGPU;
+    info.usageFlags.SetFlag(RHIBufferUsageFlagBits::eStorageBuffer);
+    RHIBuffer* first = session.rhi.CreateBuffer(info);
+    EXPECT_NE(first, nullptr);
+    EXPECT_GE(allocator.GetGPUMemoryStats().deviceLocalBytes, limit / 2);
+    info.size         = limit;
+    RHIBuffer* second = session.rhi.CreateBuffer(info);
+    EXPECT_LE(allocator.GetGPUMemoryStats().deviceLocalBytes, limit);
+    if (first != nullptr)
+    {
+        session.rhi.DestroyBuffer(first);
+    }
+    if (second != nullptr)
+    {
+        session.rhi.DestroyBuffer(second);
+    }
+    GVkMemAllocator = original;
+}
+
 TEST(VulkanProductionFailureTest, ShutdownRejectsOutstandingResourcesAndCommandContexts)
 {
     EXPECT_DEATH(

@@ -29,6 +29,7 @@
 #include <cstring>
 #include <cstdio>
 #include <memory>
+#include <limits>
 #include <random>
 #include <numeric>
 #include <string_view>
@@ -508,6 +509,8 @@ public:
 
     explicit TestPipeline(const RHIComputePipelineCreateInfo& info) : RHIPipeline(info) {}
 
+    explicit TestPipeline(const RHIRayTracingPipelineCreateInfo& info) : RHIPipeline(info) {}
+
     RHIPolygonCullMode GetCullMode() const
     {
         return m_gfxStates.rasterizationState.cullMode;
@@ -571,6 +574,9 @@ public:
     std::vector<RHIResource*>                       boundResources;
     std::vector<uint32_t>                           boundArrayIndices;
     std::vector<RHIBuffer*>                         indirectDraws;
+
+    HeapVector<std::pair<RHIShader*, RHIShaderResourceParameter>> boundShaderResources;
+
     struct IndirectDrawCall
     {
         RHIBuffer*   buffer;
@@ -647,6 +653,7 @@ public:
         for (const RHIShaderResourceParameter& resource : parameters.GetResourceParams())
         {
             boundResources.push_back(resource.pResource);
+            boundShaderResources.emplace_back(boundShader, resource);
 
             boundArrayIndices.push_back(resource.arrayIndex);
         }
@@ -654,6 +661,7 @@ public:
         for (const RHIShaderResourceParameter& resource : parameters.GetBindlessParams())
         {
             boundResources.push_back(resource.pResource);
+            boundShaderResources.emplace_back(boundShader, resource);
 
             boundArrayIndices.push_back(resource.arrayIndex);
         }
@@ -720,6 +728,19 @@ public:
         indirectDispatches.push_back(pIndirectBuffer);
         indirectShaders.push_back(boundShader);
     }
+
+    void RHITraceRays(uint32_t width, uint32_t height, uint32_t depth) override
+    {
+        rayTraces.emplace_back(boundShader, glm::uvec3(width, height, depth));
+    }
+
+    void RHITraceRaysIndirect(RHIBuffer* buffer, uint64_t offset) override
+    {
+        indirectRayTraces.emplace_back(buffer, offset);
+    }
+
+    HeapVector<std::pair<RHIShader*, glm::uvec3>> rayTraces;
+    HeapVector<std::pair<RHIBuffer*, uint64_t>>   indirectRayTraces;
 
     void RHISetPushConstants(RHIPipeline* pPipeline, VectorView<const uint8_t> data, uint32_t offset = 0) override
     {
@@ -952,6 +973,16 @@ public:
     void RHIDispatchIndirect(RHIBuffer* pIndirectBuffer, uint64_t offset) override
     {
         return log.RHIDispatchIndirect(pIndirectBuffer, offset);
+    }
+
+    void RHITraceRays(uint32_t width, uint32_t height, uint32_t depth) override
+    {
+        log.RHITraceRays(width, height, depth);
+    }
+
+    void RHITraceRaysIndirect(RHIBuffer* buffer, uint64_t offset) override
+    {
+        log.RHITraceRaysIndirect(buffer, offset);
     }
 
     void RHISetPushConstants(RHIPipeline* pPipeline, VectorView<const uint8_t> data, uint32_t offset = 0) override
@@ -1238,6 +1269,21 @@ public:
             result = pipeline;
         }
 
+        return result;
+    }
+
+    RHIPipeline* CreatePipeline(const RHIRayTracingPipelineCreateInfo& info) override
+    {
+        RHIPipeline* result = nullptr;
+        ++pipelineCount;
+        std::array<uint32_t, RHIShaderBindingTableLayout::Count> counts{};
+        if (pipelineCount != failPipelineCreationAt && info.pShader != nullptr
+            && ValidateRayTracingShaderGroups(info.pShader->GetModules(), info.groups, counts))
+        {
+            TestPipeline* pipeline = ZEN_NEW() TestPipeline(info);
+            createdPipelines.push_back(pipeline);
+            result = pipeline;
+        }
         return result;
     }
 
@@ -1916,13 +1962,14 @@ protected:
         InitializeDevice(nullptr);
     }
 
-    void InitializeDevice(RHIViewport*             viewport,
-                          uint32_t                 frameCount  = 2,
-                          RHIExecutionMode         mode        = RHIExecutionMode::eInline,
-                          AsyncComputeMode         asyncMode   = RenderConfig::GetInstance().asyncComputeMode,
-                          RHIQueueCapabilities     queues      = {false, false, {0, 1, 2}},
-                          RHIQueueCopyCapabilities computeCopy = {false, true, true, {1, 1, 1}},
-                          RHIRayQueryCapabilities  rayQuery    = {})
+    void InitializeDevice(RHIViewport*              viewport,
+                          uint32_t                  frameCount  = 2,
+                          RHIExecutionMode          mode        = RHIExecutionMode::eInline,
+                          AsyncComputeMode          asyncMode   = RenderConfig::GetInstance().asyncComputeMode,
+                          RHIQueueCapabilities      queues      = {false, false, {0, 1, 2}},
+                          RHIQueueCopyCapabilities  computeCopy = {false, true, true, {1, 1, 1}},
+                          RHIRayQueryCapabilities   rayQuery    = {},
+                          RHIRayTracingCapabilities rayTracing  = {})
     {
         destroyed.clear();
 
@@ -1939,6 +1986,8 @@ protected:
         rhi->computeCopy                 = computeCopy;
 
         rhi->info.rayQuery               = rayQuery;
+
+        rhi->info.rayTracing             = rayTracing;
 
         // Desktop compute limits, which distance-field construction requires.
         rhi->info.maxComputeWorkGroupInvocations = 1024;
@@ -5296,11 +5345,11 @@ TEST_F(RenderCoreTest, VoxelRadianceResourcesAreAllocatedOnlyOnDemand)
 
     VoxelGISettings invalid = gi.GetSettings();
 
-    invalid.maxSteps        = 0;
+    invalid.historyFrames   = 0;
 
     EXPECT_FALSE(gi.SetSettings(invalid));
 
-    EXPECT_NE(gi.GetSettings().maxSteps, 0u);
+    EXPECT_NE(gi.GetSettings().historyFrames, 0u);
 
     gi.Destroy();
 
@@ -6611,7 +6660,7 @@ TEST_F(RenderCoreTest, CompilerChecksPreserveNamedShaderDiagnostics)
 
             desc.SetShaderProgramName("missing{shader}");
 
-            EXPECT_EQ(compiler.CompileComputePass(desc), nullptr);
+            EXPECT_EQ(compiler.CompileDispatchPass(desc), nullptr);
         }
 
         EXPECT_EQ(graph.GetResult().code, RDGErrorCode::eShader);
@@ -6651,7 +6700,7 @@ TEST_F(RenderCoreTest, EncoderNamedChecksPreserveExactDiagnostics)
 {
     ShaderProgram* program = CreateTestShaderProgram(device, "diagnostic_shader");
 
-    RDGComputePass pass;
+    RDGDispatchPass pass;
 
     pass.pPipeline = device->GetOrCreateComputePipeline(program->GetShader());
 
@@ -6705,7 +6754,7 @@ TEST_F(RenderCoreTest, EncoderFailureStopsCommandsAndRetainsFirstError)
 
         RHICommandList list;
 
-        RDGComputePass pass;
+        RDGDispatchPass pass;
 
         RDGComputePassDesc desc;
 
@@ -9651,6 +9700,58 @@ TEST(RenderCoreSceneInputTest, StoragePayloadValidationIncludesAllocationPadding
     gpu.maxStorageBufferRange = 63;
 
     EXPECT_EQ(ValidateGIStorageBuffer(4, 16, gpu, bytes), GIResourceStatus::eDescriptorRange);
+}
+
+TEST(RenderCoreSceneInputTest, RadianceCacheShrinksToZeroBeforeMemoryPressure)
+{
+    RHIGPUInfo gpu;
+    gpu.maxStorageBufferRange  = UINT32_MAX;
+    gpu.storageBufferAlignment = 256;
+    RHIGPUMemoryStats memory;
+    const Vec3        extent(10);
+    EXPECT_EQ(PlanGIRadianceCache(memory, gpu, extent, 0), 0u);
+    memory.budgetAvailable  = true;
+    memory.heapCount        = 1;
+    memory.heaps[0]         = {uint64_t(8) << 30, uint64_t(4) << 30, uint64_t(8) << 30, true};
+    const uint32_t capacity = PlanGIRadianceCache(memory, gpu, extent, 0);
+    EXPECT_GT(capacity, 0u);
+    EXPECT_EQ(capacity & (capacity - 1u), 0u);
+    memory.heaps[0].usageBytes = memory.heaps[0].budgetBytes;
+    EXPECT_EQ(PlanGIRadianceCache(memory, gpu, extent, uint64_t(capacity) * 40), 0u);
+    memory.heaps[0].usageBytes = memory.heaps[0].budgetBytes - memory.heaps[0].budgetBytes / 10 - 4 * 768;
+    EXPECT_EQ(PlanGIRadianceCache(memory, gpu, extent, 0), 16u);
+    memory.heaps[0].usageBytes += 1;
+    EXPECT_EQ(PlanGIRadianceCache(memory, gpu, extent, 0), 0u);
+}
+
+TEST(RenderCoreSceneInputTest, WorldRadianceCacheBudgetIncludesPathsFacesAndAlignedRecords)
+{
+    RHIGPUInfo gpu;
+    gpu.maxStorageBufferRange  = UINT32_MAX;
+    gpu.storageBufferAlignment = 256;
+    RHIGPUMemoryStats memory;
+    memory.budgetAvailable          = true;
+    memory.heapCount                = 1;
+    memory.heaps[0]                 = {uint64_t(8) << 30, 0, uint64_t(8) << 30, true};
+
+    constexpr uint32_t strides[]    = {8, 96, 96, 12};
+    constexpr uint64_t fixedBytes   = WorldCacheLightingBytes + 129600u * 64u;
+    const uint64_t     alignedFixed = (fixedBytes + 255u) / 256u * 256u;
+    const uint64_t     reserve      = memory.heaps[0].budgetBytes - memory.heaps[0].budgetBytes / 10;
+    // At 16 cells, the key and state buffers need 256 bytes each and the
+    // accumulated and resolved directional buffers need 1536 bytes each.
+    memory.heaps[0].usageBytes = reserve - 4 * (alignedFixed + 3584u);
+    EXPECT_EQ(PlanGIRadianceCache(memory, gpu, Vec3(10), 0, strides, fixedBytes), 16u);
+    ++memory.heaps[0].usageBytes;
+    EXPECT_EQ(PlanGIRadianceCache(memory, gpu, Vec3(10), 0, strides, fixedBytes), 8u);
+    memory.heaps[0].usageBytes = reserve - 4 * fixedBytes;
+    EXPECT_EQ(PlanGIRadianceCache(memory, gpu, Vec3(10), 0, strides, fixedBytes), 0u);
+    EXPECT_EQ(PlanGIRadianceCache(memory, gpu, Vec3(10), 0, {}, 0), 0u);
+
+    memory.heaps[0].usageBytes = 0;
+    const Vec3 extent(1.0f, .55f, .65f);
+    EXPECT_EQ(PlanGIRadianceCache(memory, gpu, extent, 0, strides, fixedBytes, 600, 6), 1u << 22);
+    EXPECT_EQ(PlanGIRadianceCache(memory, gpu, extent, 0, strides, fixedBytes, 600, 8), 1u << 23);
 }
 
 TEST(RenderCoreSceneInputTest, BindlessCapacityErrorPrecedesBufferErrors)
@@ -15471,14 +15572,14 @@ struct RDGExecutionPlanTestAccess
         return graph.m_compiledGfxPasses.empty() ? nullptr : graph.m_compiledGfxPasses[0];
     }
 
-    static RDGComputePass* Compute(RenderGraph& graph)
+    static RDGDispatchPass* Compute(RenderGraph& graph)
     {
-        return graph.m_compiledComputePasses.empty() ? nullptr : graph.m_compiledComputePasses[0];
+        return graph.m_compiledDispatchPasses.empty() ? nullptr : graph.m_compiledDispatchPasses[0];
     }
 
     static size_t IdleCount(const RenderGraph& graph)
     {
-        return graph.m_idleGfxPasses.size() + graph.m_idleComputePasses.size();
+        return graph.m_idleGfxPasses.size() + graph.m_idleDispatchPasses.size();
     }
 
     static const RDGCompiledNode& CompiledNode(const RenderGraph& graph, size_t index = 0)
@@ -15530,7 +15631,7 @@ struct RDGExecutionPlanTestAccess
             EXPECT_EQ(pass->geometryBuffer.indexBufferOffset, 0u);
         }
 
-        for (RDGComputePass* pass : graph.m_idleComputePasses)
+        for (RDGDispatchPass* pass : graph.m_idleDispatchPasses)
         {
             CheckIdlePass(pass, bytes);
         }
@@ -15948,7 +16049,7 @@ TEST_F(RenderCoreTest, CompiledPassStorageRebuildsBindingsAndClearsFailedRecordi
 
     RDGGraphicsPass* firstGraphics = nullptr;
 
-    RDGComputePass* firstCompute   = nullptr;
+    RDGDispatchPass* firstCompute  = nullptr;
 
     for (uint32_t run = 0; run < 5; ++run)
     {
@@ -16056,7 +16157,7 @@ TEST_F(RenderCoreTest, CompiledPassStorageRebuildsBindingsAndClearsFailedRecordi
 
         RDGGraphicsPass* compiledGraphics = Access::Graphics(graph);
 
-        RDGComputePass* compiledCompute   = Access::Compute(graph);
+        RDGDispatchPass* compiledCompute  = Access::Compute(graph);
 
         ASSERT_NE(compiledGraphics, nullptr);
 
@@ -16974,7 +17075,9 @@ TEST_F(RenderCoreTest, PipelineMetricsUseTheExecutingGraphsTimingOptionAndResetO
 
     EXPECT_GT(metrics.creationCPUUs, 0);
 
-    EXPECT_GE(first.passCompileTimings.pipelineCPUUs, metrics.keyCPUUs + metrics.lookupCPUUs + metrics.creationCPUUs);
+    // Adding three converted durations can round above the enclosing duration by a few ULPs.
+    const double summedCPUUs = metrics.keyCPUUs + metrics.lookupCPUUs + metrics.creationCPUUs;
+    EXPECT_GE(first.passCompileTimings.pipelineCPUUs + 4 * std::numeric_limits<double>::epsilon() * summedCPUUs, summedCPUUs);
 
     ASSERT_TRUE(executor.Execute(&graph, &commands));
 
@@ -17277,6 +17380,7 @@ TEST_F(RenderCoreTest, DISABLED_PassSetupBenchmark)
 
 #include "AsyncComputeLifetimeTests.inl"
 #include "RDGQueuePreferenceTests.inl"
+#include "RayTracingGraphTests.inl"
 #include "RDGScheduleTests.inl"
 #include "RDGDebugSnapshotTests.inl"
 #include "RDGGroupRecordingTests.inl"

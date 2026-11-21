@@ -8,7 +8,6 @@
 namespace
 {
 using zen::platform::ConfigLoader;
-using zen::platform::VoxelizerMode;
 using zen::rc::AsyncComputeMode;
 using zen::rc::AsyncComputeStatus;
 
@@ -140,36 +139,6 @@ TEST(ConfigLoaderTests, AsyncComputePolicyReportsEveryFallback)
     }
 }
 
-TEST(ConfigLoaderTests, ParsesVoxelizerModes)
-{
-    for (const std::pair<const char*, VoxelizerMode>& entry :
-         {std::pair{"auto", VoxelizerMode::eAuto}, std::pair{"comp", VoxelizerMode::eCompute},
-          std::pair{"geom", VoxelizerMode::eGeometry}})
-    {
-        SCOPED_TRACE(entry.first);
-
-        std::istringstream input(std::string("voxelizer=") + entry.first);
-
-        ConfigLoader config(input);
-
-        EXPECT_EQ(config.GetVoxelizerMode(), entry.second);
-    }
-}
-
-TEST(ConfigLoaderTests, MissingOrInvalidVoxelizerDefaultsToAuto)
-{
-    for (const char* text : {"", "voxelizer=", "voxelizer=invalid", "# voxelizer=comp"})
-    {
-        SCOPED_TRACE(text);
-
-        std::istringstream input(text);
-
-        ConfigLoader config(input);
-
-        EXPECT_EQ(config.GetVoxelizerMode(), VoxelizerMode::eAuto);
-    }
-}
-
 TEST(ConfigLoaderTests, IgnoresCommentsAndTrimsWhitespace)
 {
     const std::string modelRoot = (std::filesystem::path(ZEN_CONFIG_PATH).root_path() / "assets/Models").generic_string();
@@ -181,14 +150,14 @@ TEST(ConfigLoaderTests, IgnoresCommentsAndTrimsWhitespace)
                              + " \r\n"
                                " default_model = Sponza # scene\r\n"
                                " skybox_model = Box\r\n"
-                               " voxelizer = geom # prefer geometry\r\n"
-                               "#voxelizer=comp\r\n"
-                               " \t# voxelizer = comp\r\n"
+                               " async_compute = auto # prefer async\r\n"
+                               "#async_compute=off\r\n"
+                               " \t# async_compute = off\r\n"
                                "ignored line\r\n");
 
     ConfigLoader config(input);
 
-    EXPECT_EQ(config.GetVoxelizerMode(), VoxelizerMode::eGeometry);
+    EXPECT_EQ(config.GetAsyncComputeMode(), AsyncComputeMode::eAuto);
 
     EXPECT_EQ(config.GetDefaultModelPath(), modelRoot + "/Sponza/glTF/Sponza.gltf");
 
@@ -263,39 +232,6 @@ TEST(ConfigLoaderTests, ExplicitFbxPathUsesExistingModelConfigurationKeys)
     ConfigLoader                config(input);
     const std::filesystem::path directory = std::filesystem::path(ZEN_CONFIG_PATH).parent_path();
     EXPECT_EQ(config.GetDefaultModelPath(), (directory / "Scenes/interior.fbx").generic_string());
-}
-
-TEST(ConfigLoaderTests, ValidatesVoxelizerChoiceAgainstGPUCapabilities)
-{
-    struct TestCase
-    {
-        const char*   value;
-        bool          supportsGeometryShader;
-        VoxelizerMode expected;
-    };
-
-    const TestCase cases[] = {
-        {"auto", false, VoxelizerMode::eCompute}, {"auto", true, VoxelizerMode::eGeometry},
-        {"comp", false, VoxelizerMode::eCompute}, {"comp", true, VoxelizerMode::eCompute},
-        {"geom", false, VoxelizerMode::eCompute}, {"geom", true, VoxelizerMode::eGeometry},
-    };
-
-    for (const TestCase& test : cases)
-    {
-        SCOPED_TRACE(test.value);
-
-        SCOPED_TRACE(test.supportsGeometryShader);
-
-        std::istringstream input(std::string("voxelizer=") + test.value);
-
-        ConfigLoader config(input);
-
-        zen::RHIGPUInfo gpuInfo{};
-
-        gpuInfo.supportGeometryShader = test.supportsGeometryShader;
-
-        EXPECT_EQ(zen::rc::ResolveVoxelizerMode(config.GetVoxelizerMode(), gpuInfo), test.expected);
-    }
 }
 
 TEST(ConfigLoaderTests, VoxelWorkgroupsRespectInvocationAndPerAxisLimits)

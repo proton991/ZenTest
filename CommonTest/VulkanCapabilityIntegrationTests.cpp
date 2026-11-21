@@ -25,6 +25,7 @@ struct CapabilityDriver
     static inline PFN_vkCreateDevice                           create;
     static inline bool                                         oldAPI{}, noQueue{}, lowLimits{}, optionalDisabled{};
     static inline bool                                         maintenanceDisabled{};
+    static inline bool                                         invocationReorderUnavailable{}, traceIndirectUnavailable{};
     static inline uint32_t                                     missingFeature{};
     static inline VkStructureType                              missingRayFeature{VK_STRUCTURE_TYPE_MAX_ENUM};
     static inline HeapVector<std::string>                      hiddenExtensions, enabledExtensions;
@@ -39,6 +40,7 @@ struct CapabilityDriver
         oldAPI = noQueue = lowLimits = optionalDisabled = false;
 
         maintenanceDisabled                             = false;
+        invocationReorderUnavailable = traceIndirectUnavailable = false;
 
         missingFeature = createCalls = 0;
 
@@ -142,6 +144,25 @@ struct CapabilityDriver
                     {
                         reinterpret_cast<VkPhysicalDeviceRayTracingPipelineFeaturesKHR*>(node)->rayTracingPipeline = VK_FALSE;
                     }
+                    if (traceIndirectUnavailable)
+                    {
+                        reinterpret_cast<VkPhysicalDeviceRayTracingPipelineFeaturesKHR*>(node)
+                            ->rayTracingPipelineTraceRaysIndirect = VK_FALSE;
+                    }
+                    break;
+                case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_EXT:
+                    if (missingRayFeature == node->sType)
+                    {
+                        reinterpret_cast<VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT*>(node)
+                            ->rayTracingInvocationReorder = VK_FALSE;
+                    }
+                    break;
+                case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV:
+                    if (missingRayFeature == node->sType)
+                    {
+                        reinterpret_cast<VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV*>(node)
+                            ->rayTracingInvocationReorder = VK_FALSE;
+                    }
                     break;
                 case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR:
                     if (missingRayFeature == node->sType)
@@ -172,6 +193,18 @@ struct CapabilityDriver
             {
                 reinterpret_cast<VkPhysicalDeviceDescriptorIndexingProperties*>(node)
                     ->maxDescriptorSetUpdateAfterBindSampledImages = 1;
+            }
+            if (invocationReorderUnavailable
+                && node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_EXT)
+            {
+                reinterpret_cast<VkPhysicalDeviceRayTracingInvocationReorderPropertiesEXT*>(node)
+                    ->rayTracingInvocationReorderReorderingHint = VK_RAY_TRACING_INVOCATION_REORDER_MODE_NONE_EXT;
+            }
+            if (invocationReorderUnavailable
+                && node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_NV)
+            {
+                reinterpret_cast<VkPhysicalDeviceRayTracingInvocationReorderPropertiesNV*>(node)
+                    ->rayTracingInvocationReorderReorderingHint = VK_RAY_TRACING_INVOCATION_REORDER_MODE_NONE_NV;
             }
         }
     }
@@ -977,6 +1010,61 @@ TEST_F(VulkanCapabilityIntegrationTest, RayTracingFollowsDeviceCapabilitiesAndDe
         }
     }
     RHIOptions::GetInstance().SetRayTracingDisabled(previousDisabled);
+}
+
+TEST_F(VulkanCapabilityIntegrationTest, InvocationReorderAndIndirectTracingRespectOptionalCapabilities)
+{
+    DeviceExtensionFlags baseline{};
+    bool                 nvAvailable = false;
+    {
+        ScopedTopologyDevice device(session->rhi.GetPhysicalDevice());
+        baseline = device.device.GetExtensionFlags();
+    }
+    {
+        CapabilityDriver::hiddenExtensions.emplace_back(VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME);
+        ScopedTopologyDevice device(session->rhi.GetPhysicalDevice());
+        nvAvailable = device.device.GetExtensionFlags().hasInvocationReorderNV;
+    }
+    for (uint32_t scenario = 0; scenario < 7; ++scenario)
+    {
+        SCOPED_TRACE(scenario);
+        CapabilityDriver::Reset();
+        if (scenario == 1)
+        {
+            CapabilityDriver::missingRayFeature = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_EXT;
+        }
+        if (scenario == 2 || scenario == 3)
+        {
+            CapabilityDriver::hiddenExtensions.emplace_back(VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME);
+        }
+        if (scenario == 3)
+        {
+            CapabilityDriver::hiddenExtensions.emplace_back(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME);
+        }
+        CapabilityDriver::invocationReorderUnavailable = scenario == 4;
+        if (scenario == 5)
+        {
+            CapabilityDriver::missingRayFeature = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+        }
+        CapabilityDriver::traceIndirectUnavailable = scenario == 6;
+        ScopedTopologyDevice        device(session->rhi.GetPhysicalDevice());
+        const DeviceExtensionFlags& enabled = device.device.GetExtensionFlags();
+        const bool                  ext     = baseline.hasInvocationReorderEXT && (scenario == 0 || scenario == 6);
+        const bool                  nv      = nvAvailable && !ext && scenario != 3 && scenario != 4 && scenario != 5;
+        EXPECT_EQ(enabled.hasInvocationReorderEXT != 0, ext);
+        EXPECT_EQ(enabled.hasInvocationReorderNV != 0, nv);
+        EXPECT_EQ(enabled.hasRaytracingPipeline != 0, baseline.hasRaytracingPipeline && scenario != 5);
+        EXPECT_EQ(enabled.hasTraceRaysIndirect != 0, baseline.hasTraceRaysIndirect && scenario != 5 && scenario != 6);
+        const VkStructureType structures[] = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_EXT,
+                                              VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV};
+        const bool            expected[]   = {ext, nv};
+        for (uint32_t index = 0; index < 2; ++index)
+        {
+            EXPECT_EQ(std::count(CapabilityDriver::enabledStructures.begin(), CapabilityDriver::enabledStructures.end(),
+                                 structures[index]),
+                      expected[index] ? 1 : 0);
+        }
+    }
 }
 
 TEST_F(VulkanCapabilityIntegrationTest, OptionalFeaturesDisableTheirDependentsAndVMAAddressFlag)

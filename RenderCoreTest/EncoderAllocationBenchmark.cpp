@@ -366,7 +366,7 @@ bool BenchmarkOperations(bool requireNoAllocations)
 
     graphics.geometryBuffer.pIndexBuffer = &buffer;
 
-    zen::rc::RDGComputePass compute;
+    zen::rc::RDGDispatchPass compute;
 
     compute.pPipeline = &computePipeline;
 

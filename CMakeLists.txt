@@ -29,6 +29,7 @@ endif()
 add_executable(ThreadPoolTest ThreadPoolTest/main.cpp)
 add_executable(FlatHashMapTest FlatHashMapTest/FlatHashMapTests.cpp)
 add_executable(VulkanRHITest
+    CommonTest/RayTracingLayoutTests.cpp
     CommonTest/VulkanReviewTests.cpp
     CommonTest/ShaderReflectionTests.cpp
     CommonTest/VulkanSynchronizationTests.cpp
@@ -78,12 +79,17 @@ foreach(SHADER review_acceleration.comp review_runtime_array.comp review_reserve
         binding_sampler.comp binding_recording_array.comp binding_single_layer_array.comp binding_uniform_array.comp binding_bindless.comp binding_bindless.frag binding_bindless_array.comp binding_bindless_cube_array.comp binding_push_constants.comp
         recording_uniform.frag recording_uniform.comp recording_vertex.vert async_resources.comp binding_texel.comp
         binding_high_set.comp binding_required_sets.comp binding_validation.comp
-        unsupported_tessellation.tesc unsupported_tessellation.tese)
+        unsupported_tessellation.tesc unsupported_tessellation.tese
+        rt_shared.rgen rt_shared.rmiss rt_secondary.rmiss rt_shared.rchit rt_shared.rahit rt_shared.rcall)
     set(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/CommonTest/Shaders/${SHADER}")
     set(OUTPUT "${RDG_REFLECTION_TEST_PATH}${SHADER}.spv")
+    set(REFLECTION_SPIRV_TARGET spirv1.3)
+    if(SHADER MATCHES "\\.(rgen|rmiss|rchit|rahit|rcall)$")
+        set(REFLECTION_SPIRV_TARGET spirv1.4)
+    endif()
     add_custom_command(OUTPUT "${OUTPUT}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${RDG_REFLECTION_TEST_PATH}"
-        COMMAND ${GLSL_VALIDATOR} --target-env spirv1.3 -V "${SOURCE}" "-I${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Include" "-I${ZEN_ENGINE_SOURCE_DIR}/Data/Shaders" -o "${OUTPUT}"
+        COMMAND ${GLSL_VALIDATOR} --target-env ${REFLECTION_SPIRV_TARGET} -V "${SOURCE}" "-I${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Include" "-I${ZEN_ENGINE_SOURCE_DIR}/Data/Shaders" -o "${OUTPUT}"
         DEPENDS "${SOURCE}" "${ZEN_ENGINE_SOURCE_DIR}/Data/Shaders/Common/bindless_heap.glsl"
                 "${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Include/Graphics/Shared/Bindless.h" VERBATIM)
     list(APPEND RDG_REFLECTION_TEST_BINARIES "${OUTPUT}")
@@ -169,6 +175,14 @@ target_link_libraries(SmartPtrTest ZenCore gtest_main)
 target_link_libraries(CommonTest PRIVATE ZenCore gtest_main)
 target_include_directories(CommonTest PRIVATE ${ZEN_ENGINE_SOURCE_DIR}/ZenCore/Source)
 
+# The GI tools and their tests share the dependencies installed in the repository's virtual environment.
+if(NOT Python3_EXECUTABLE AND NOT Python3_ROOT_DIR AND NOT DEFINED ENV{VIRTUAL_ENV})
+    find_program(ZEN_TEST_VENV_PYTHON NAMES python3 python
+        PATHS "${ZEN_ENGINE_SOURCE_DIR}/build/venv" PATH_SUFFIXES Scripts bin NO_DEFAULT_PATH NO_CACHE)
+    if(ZEN_TEST_VENV_PYTHON)
+        set(Python3_EXECUTABLE "${ZEN_TEST_VENV_PYTHON}")
+    endif()
+endif()
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if (Python3_Interpreter_FOUND)
     add_test(NAME NoEngineExceptions COMMAND ${Python3_EXECUTABLE} ${ZEN_ENGINE_SOURCE_DIR}/tools/check_no_exceptions.py)

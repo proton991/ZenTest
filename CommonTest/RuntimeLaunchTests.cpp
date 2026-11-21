@@ -88,19 +88,26 @@ TEST(RuntimeLaunch, RoundTripFullConfigurationAndWideIds)
     source.rendering.normalizationCenter            = Vec3(2, 3, 4);
     source.rendering.normalizationScale             = 0.125f;
     source.rendering.gi.cone.samples                = 2;
+    source.rendering.gi.cone.referenceSamples       = 64;
+    source.rendering.gi.cone.referenceTileStride    = 8;
     source.rendering.gi.cone.pixelResolutionDivisor = 2;
     source.rendering.gi.cone.restirGI               = true;
     source.rendering.gi.cone.restirSpatial          = false;
     source.rendering.gi.cone.restirSpecular         = false;
-    source.rendering.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Hardware);
-    source.rendering.gi.reflectanceBudgetBytes     = 4294967296ull;
-    source.rendering.gi.cone.previousFrameRadiance = true;
-    source.rendering.gi.cone.probeSpacing          = 8;
-    source.rendering.gi.cone.indirectIntensity     = 0.25f;
-    source.rendering.transparency                  = {rc::TransparencyCoreMode::eForce, .97f};
-    source.rendering.cameraLight.position          = Vec3(1, 2, 3);
-    source.rendering.cameraLight.followCamera      = false;
-    source.rendering.environment.rotationDegrees   = 65.0f;
+    source.rendering.gi.cone.nativeProbeBenchmark   = true;
+    source.rendering.gi.cone.worldRadianceCache     = true;
+    source.rendering.gi.cone.worldCacheFeedback     = false;
+    source.rendering.gi.cone.worldCacheTileSize     = 6;
+    source.rendering.gi.cone.worldCacheHistory      = 16;
+    source.rendering.gi.cone.worldCacheUnusedFrames = 64;
+    source.rendering.gi.cone.screenProbeGI          = true;
+    source.rendering.gi.cone.rayProvider            = rc::VoxelGISettings::RayProvider::Hardware;
+    source.rendering.gi.reflectanceBudgetBytes      = 4294967296ull;
+    source.rendering.gi.cone.indirectIntensity      = 0.25f;
+    source.rendering.transparency                   = {rc::TransparencyCoreMode::eForce, .97f};
+    source.rendering.cameraLight.position           = Vec3(1, 2, 3);
+    source.rendering.cameraLight.followCamera       = false;
+    source.rendering.environment.rotationDegrees    = 65.0f;
     source.rendering.lights.push_back({9007199254740993ull, rc::LightOrigin::eManual, {}});
     source.rendering.debug.lightId = source.rendering.lights[0].id;
     source.camera.eye              = Vec3(3, 2, 4);
@@ -153,6 +160,20 @@ TEST(RuntimeLaunch, OlderSetupsDefaultToFullscreenAndRejectInvalidFullscreenFiel
     json.insert(position, "\"fullscreen\":true,");
     EXPECT_FALSE(DecodeRuntimeLaunchSettings(json, loaded, error));
     EXPECT_FALSE(loaded.run.fullscreen);
+}
+
+TEST(RuntimeLaunch, OlderSetupsKeepWorldCacheFeedbackEnabled)
+{
+    std::string json;
+    std::string error;
+    ASSERT_TRUE(EncodeRuntimeLaunchSettings(Fixture(), json, error));
+    const std::string field    = "\"worldCacheFeedback\":true,";
+    const size_t      position = json.find(field);
+    ASSERT_NE(position, std::string::npos);
+    json.erase(position, field.size());
+    RuntimeLaunchSettings loaded;
+    ASSERT_TRUE(DecodeRuntimeLaunchSettings(json, loaded, error)) << error;
+    EXPECT_TRUE(loaded.rendering.gi.cone.worldCacheFeedback);
 }
 
 TEST(RuntimeLaunch, NormalMapsDefaultOnAndRejectNonBooleanValues)

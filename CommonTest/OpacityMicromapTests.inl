@@ -96,9 +96,38 @@ TEST_P(RayQueryIntegrationTest, FourStateMicromapsKeepUnknownCandidateFallbackAn
         pass.BindStorageBuffer("Results", result, RDGContentGuarantee::eFullWrite);
         graph.AddComputePass(std::move(pass)).RecordPassCommands([](RDGPassCmdEncoder& encoder) { encoder.Dispatch(8, 1, 1); });
         graph.AddTransferPass("ReadMicromapQueries").CopyBuffer(result, readback, {0, 0, 8 * sizeof(Vec4)});
+        RHIBuffer* pipelineReadback = nullptr;
+        if (device->GetGPUInfo().rayTracing.IsUsable())
+        {
+            const HeapVector<ShaderProgram::StageFile> modules = {
+                {RHIShaderStage::eRayGeneration, "VoxelGI/Calibration/micromap_rt_check.rgen.spv"},
+                {RHIShaderStage::eMiss, "VoxelGI/Calibration/scene_rt_check.rmiss.spv"},
+                {RHIShaderStage::eClosestHit, "VoxelGI/Calibration/micromap_rt_check.rchit.spv"},
+                {RHIShaderStage::eAnyHit, "VoxelGI/Calibration/micromap_rt_check.rahit.spv"}};
+            ShaderProgramManager::GetInstance().StoreProgram(ZEN_NEW() RayTracingFileSP(device, "MicromapRTCheckSP", modules));
+            RHIBuffer* pipelineOutput = Buffer(8 * sizeof(Vec4), inputUsage, nullptr, RHIBufferAllocateType::eGPU);
+            pipelineReadback =
+                Buffer(8 * sizeof(Vec4), BitField<RHIBufferUsageFlagBits>(RHIBufferUsageFlagBits::eTransferDstBuffer), nullptr,
+                       RHIBufferAllocateType::eCPURead);
+            ASSERT_NE(pipelineOutput, nullptr);
+            ASSERT_NE(pipelineReadback, nullptr);
+            RDGRayTracingPassDesc pipelinePass;
+            pipelinePass.SetShaderProgramName("MicromapRTCheckSP");
+            pipelinePass.SetQueuePreference(RDGQueuePreference::ePreferAsyncCompute);
+            pipelinePass.SetShaderGroups({{RHIRayTracingShaderGroupType::eRayGeneration, 0},
+                                          {RHIRayTracingShaderGroupType::eMiss, 1},
+                                          {RHIRayTracingShaderGroupType::eHit, kUnusedRayTracingShader, 2, 3}});
+            pipelinePass.BindAccelerationStructure("testScene", tlas.pDestination);
+            pipelinePass.BindStorageBuffer("Results", pipelineOutput, RDGContentGuarantee::eFullWrite);
+            graph.AddRayTracingPass(std::move(pipelinePass)).RecordPassCommands([](RDGPassCmdEncoder& encoder) {
+                encoder.TraceRays(8, 1);
+            });
+            graph.AddTransferPass("ReadMicromapPipeline")
+                .CopyBuffer(pipelineOutput, pipelineReadback, {0, 0, 8 * sizeof(Vec4)});
+        }
         ASSERT_TRUE(graph.End()) << graph.GetResult().message;
         ASSERT_TRUE(device->ExecuteRenderGraph(graph));
-        CheckQueryQueue(graph);
+        CheckQueryQueue(graph, pipelineReadback != nullptr ? 2 : 1);
         device->WaitForIdle();
         const Vec4* values = reinterpret_cast<const Vec4*>(readback->Map());
         ASSERT_NE(values, nullptr);
@@ -108,6 +137,13 @@ TEST_P(RayQueryIntegrationTest, FourStateMicromapsKeepUnknownCandidateFallbackAn
             const bool hit = index == 2 || index == 3 || index == 4 || index == 6;
             EXPECT_FLOAT_EQ(values[index].x, hit ? 1.0f : -1.0f);
             EXPECT_FLOAT_EQ(values[index].y, index >= 4 ? 1.0f : 0.0f);
+        }
+        if (pipelineReadback != nullptr)
+        {
+            const Vec4* pipelineValues = reinterpret_cast<const Vec4*>(pipelineReadback->Map());
+            ASSERT_NE(pipelineValues, nullptr);
+            EXPECT_EQ(std::memcmp(pipelineValues, values, 8 * sizeof(Vec4)), 0);
+            pipelineReadback->Unmap();
         }
         readback->Unmap();
     }

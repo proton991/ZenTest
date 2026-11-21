@@ -196,7 +196,7 @@ TEST_P(RDGQueuePreferenceTest, RebuildInvalidatesPlansAndResetsReusedPassPrefere
     Access::Plan   old;
     const uint64_t progressQueries = rhi->progressQueries;
     ASSERT_TRUE(Access::Prepare(executor, graph, old));
-    RDGComputePass* storage = Access::Compute(graph);
+    RDGDispatchPass* storage = Access::Compute(graph);
     ASSERT_TRUE(other.Prepare(&graph));
     ASSERT_TRUE(Access::Refresh(executor, old));
     EXPECT_EQ(old.preparationPasses, 2u);

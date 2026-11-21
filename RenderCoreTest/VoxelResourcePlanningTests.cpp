@@ -2,6 +2,7 @@
 #include "Graphics/RenderCore/V2/ComputeDispatch.h"
 #include "Graphics/Shared/VoxelGI.h"
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <limits>
 
 namespace
@@ -61,6 +62,147 @@ void CheckDispatchCoverage(uint32_t count, const RHIGPUInfo& gpu)
     {
         EXPECT_EQ(visitsPerItem, 1u);
     }
+}
+
+struct FieldPacingRun
+{
+    uint64_t processed{0};
+    uint32_t skipped{0};
+    uint32_t frames{0};
+    uint32_t minimumBatchCap{UINT32_MAX};
+};
+
+// Drives one generation's pacing with a modeled frame: the render-only interval plus the construction
+// cost submitted three frames earlier (frames in flight), smoothed as DistanceFieldScene smooths it.
+FieldPacingRun RunFieldPacing(FieldThroughputPacing&       pacing,
+                              const FieldThroughputLimits& limits,
+                              double                       renderUs,
+                              double                       triangleUs,
+                              uint32_t                     maxFrames)
+{
+    FieldPacingRun run;
+    double         costs[3]  = {0.0, 0.0, 0.0};
+    double         interval  = renderUs;
+    bool           submitted = false;
+    while (run.processed < limits.triangleCount && run.frames < maxFrames)
+    {
+        interval = 0.5 * (interval + renderUs + costs[2]);
+        costs[2] = costs[1];
+        costs[1] = costs[0];
+        costs[0] = 0.0;
+        if (PaceFieldThroughput(pacing, limits, interval, submitted))
+        {
+            const uint64_t work =
+                std::min<uint64_t>(limits.triangleCount - run.processed, uint64_t(pacing.batchCap) * pacing.cycles);
+            run.processed       += work;
+            costs[0]             = triangleUs * static_cast<double>(work);
+            submitted            = true;
+            run.minimumBatchCap  = std::min(run.minimumBatchCap, pacing.batchCap);
+        }
+        else
+        {
+            ++run.skipped;
+        }
+        ++run.frames;
+    }
+    return run;
+}
+
+FieldThroughputLimits NewSponzaFieldLimits()
+{
+    // VoxelGIRenderer's construction settings and the recorded 215,361-triangle local generation.
+    FieldThroughputLimits limits;
+    limits.budgetUs      = 16000.0;
+    limits.budgetShare   = 0.25;
+    limits.maxCycles     = 4;
+    limits.batchCeiling  = 1u << 20;
+    limits.triangleCount = 215361;
+    limits.probeFrames   = 8;
+    return limits;
+}
+
+TEST(FieldThroughputPacing, AbsoluteBudgetAloneStarvesSlowFrames)
+{
+    // Compute GI frames at 4K measured 83-85 ms; with slow rendering, the 16 ms budget alone shrinks
+    // the batch cap to one triangle and the generation never publishes.
+    FieldThroughputLimits limits = NewSponzaFieldLimits();
+    limits.budgetShare           = 0.0;
+    FieldThroughputPacing pacing;
+    pacing.batchCap = 65536;
+    StartFieldThroughputGeneration(pacing);
+    const FieldPacingRun run = RunFieldPacing(pacing, limits, 83000.0, 0.25, 1024);
+    EXPECT_LT(run.processed, limits.triangleCount);
+    EXPECT_EQ(pacing.batchCap, 1u);
+    EXPECT_EQ(run.skipped, 0u);
+}
+
+TEST(FieldThroughputPacing, SlowRenderingMeasuresItsIntervalAndFinishes)
+{
+    const FieldThroughputLimits limits = NewSponzaFieldLimits();
+    FieldThroughputPacing       pacing;
+    pacing.batchCap = 65536;
+    StartFieldThroughputGeneration(pacing);
+    const FieldPacingRun run = RunFieldPacing(pacing, limits, 83000.0, 0.25, 1024);
+    EXPECT_EQ(run.processed, limits.triangleCount);
+    EXPECT_LE(run.frames, 64u);
+    // One probe per generation, which settles on the render-only interval.
+    EXPECT_EQ(run.skipped, limits.probeFrames);
+    EXPECT_NEAR(pacing.renderIntervalUs, 83000.0, 83000.0 * 0.05);
+    EXPECT_TRUE(pacing.probed);
+}
+
+TEST(FieldThroughputPacing, FastRenderingGrowsWithoutProbing)
+{
+    const FieldThroughputLimits limits = NewSponzaFieldLimits();
+    FieldThroughputPacing       pacing;
+    pacing.batchCap = 65536;
+    StartFieldThroughputGeneration(pacing);
+    const FieldPacingRun run = RunFieldPacing(pacing, limits, 6000.0, 0.01, 1024);
+    EXPECT_EQ(run.processed, limits.triangleCount);
+    EXPECT_EQ(run.skipped, 0u);
+    EXPECT_FALSE(pacing.probed);
+    EXPECT_EQ(pacing.renderIntervalUs, 0.0);
+    EXPECT_GT(pacing.batchCap, 65536u);
+}
+
+TEST(FieldThroughputPacing, ProbesOncePerGenerationAndKeepsTheBatchCap)
+{
+    // A generation too large to finish here, with construction far over the allowance: one probe,
+    // then the batch cap shrinks toward the share left above the measured render-only interval.
+    FieldThroughputLimits limits = NewSponzaFieldLimits();
+    limits.triangleCount         = 50000000;
+    FieldThroughputPacing pacing;
+    pacing.batchCap = 65536;
+    StartFieldThroughputGeneration(pacing);
+    const FieldPacingRun first = RunFieldPacing(pacing, limits, 83000.0, 10.0, 256);
+    EXPECT_EQ(first.frames, 256u);
+    EXPECT_EQ(first.skipped, limits.probeFrames);
+    EXPECT_GT(first.processed, 0u);
+    EXPECT_LT(first.minimumBatchCap, 2048u);
+    // Construction submitted before the probe can still be in flight: the measurement is an upper bound.
+    EXPECT_GE(pacing.renderIntervalUs, 83000.0);
+    EXPECT_LE(pacing.renderIntervalUs, 83000.0 * 1.15);
+    const uint32_t retainedCap = pacing.batchCap;
+    StartFieldThroughputGeneration(pacing);
+    EXPECT_EQ(pacing.batchCap, retainedCap);
+    EXPECT_EQ(pacing.cycles, 1u);
+    EXPECT_FALSE(pacing.probed);
+    const FieldPacingRun second = RunFieldPacing(pacing, limits, 120000.0, 10.0, 256);
+    EXPECT_EQ(second.skipped, limits.probeFrames);
+    EXPECT_GE(pacing.renderIntervalUs, 120000.0);
+    EXPECT_LE(pacing.renderIntervalUs, 120000.0 * 1.15);
+}
+
+TEST(FieldThroughputPacing, UnsubmittedGenerationRunsOneCycle)
+{
+    const FieldThroughputLimits limits = NewSponzaFieldLimits();
+    FieldThroughputPacing       pacing;
+    pacing.batchCap = 4096;
+    pacing.cycles   = 4;
+    EXPECT_TRUE(PaceFieldThroughput(pacing, limits, 1.0e6, false));
+    EXPECT_EQ(pacing.cycles, 1u);
+    EXPECT_EQ(pacing.batchCap, 4096u);
+    EXPECT_FALSE(pacing.probed);
 }
 
 TEST(VoxelReflectancePlanning, ChecksCountRangeBudgetAndRetirementBeforeAllocation)

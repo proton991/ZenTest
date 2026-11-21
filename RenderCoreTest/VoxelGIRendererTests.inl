@@ -284,7 +284,6 @@ TEST_F(RenderCoreTest, VoxelGISettingsInvalidateOnlyDependentPasses)
           {"EnvironmentRowsSP", "VoxelGI/environment_rows.comp.spv"},
           {"EnvironmentTilesSP", "VoxelGI/environment_tiles.comp.spv"},
           {"VoxelFilterRadianceSP", "VoxelGI/filter_radiance.comp.spv"},
-          {"VoxelSkyIrradianceLegacySP", "VoxelGI/sky_irradiance_legacy.comp.spv"},
           {"VoxelInjectRadianceSP", "VoxelGI/inject_radiance.comp.spv"}})
     {
         RHIShaderCreateInfo info;
@@ -314,7 +313,11 @@ TEST_F(RenderCoreTest, VoxelGISettingsInvalidateOnlyDependentPasses)
     ASSERT_TRUE(gi.Init());
     VoxelGISettings settings;
     ASSERT_TRUE(gi.SetSettings(settings));
-    RDGMetrics& metrics = device->GetRDGMetrics();
+    RDGMetrics&       metrics          = device->GetRDGMetrics();
+    RDGMetricsOptions metricOptions    = metrics.GetOptions();
+    metricOptions.includeTransferNodes = true;
+    metricOptions.maxNodeDetails       = 512;
+    metrics.Configure(metricOptions);
     metrics.SetSink({});
     RenderGraph* graph         = device->GetCurrentFrameRDG();
 
@@ -328,17 +331,12 @@ TEST_F(RenderCoreTest, VoxelGISettingsInvalidateOnlyDependentPasses)
         switch (frame)
         {
             case 2: settings.indirectIntensity = 2.0f; break;
-            case 3: settings.coneAngleDegrees = 45.0f; break;
-            case 4: settings.stepScale = 0.5f; break;
-            case 5: settings.maxDistanceGridLengths = 1.0f; break;
-            case 6: settings.maxSteps = 64; break;
             case 7: settings.shadows = false; break;
-            case 8: settings.coneCount = 4; break;
             case 9: settings.normalBiasVoxels = 2.0f; break;
             case 10:
             {
                 VoxelGISettings invalid = settings;
-                invalid.coneCount       = 5;
+                invalid.historyFrames   = 0;
                 EXPECT_FALSE(gi.SetSettings(invalid));
                 break;
             }
@@ -410,8 +408,7 @@ TEST_F(RenderCoreTest, VoxelGISettingsInvalidateOnlyDependentPasses)
         ASSERT_TRUE(device->ExecuteRenderGraph(*graph)) << graph->GetResult().message;
         gi.OnRenderGraphExecuted(RenderFrameResult::eSubmitted);
         volumes.OnRenderGraphExecuted(RenderFrameResult::eSubmitted);
-        const bool skyChanged =
-            geometryChanged || environmentChanged || frame == 3 || frame == 8 || frame == 9 || frame == 25 || frame == 29;
+        const bool skyChanged      = geometryChanged || environmentChanged || frame == 9 || frame == 25 || frame == 29;
         const bool radianceChanged = skyChanged || frame == 7 || frame == 11 || frame == 24 || frame == 26 || frame == 28
                                   || frame == 30 || (frame >= 32 && frame != 34);
         const RDGMetricsSnapshot& snapshot = metrics.GetLastSnapshot();
@@ -678,7 +675,7 @@ TEST_F(RenderCoreTest, VoxelGIFieldAtlasCanAddressEverySupportedCell)
         SCOPED_TRACE(side);
         VoxelGISettings settings;
         settings.fieldResolution = side;
-        settings.SetAllFeatureProviders(VoxelGISettings::RayProvider::Voxel);
+        settings.rayProvider     = VoxelGISettings::RayProvider::Voxel;
         ASSERT_TRUE(gi.SetSettings(settings));
         BuildRayQueryFrame(device, gi);
         ASSERT_TRUE(PrepareComputeField(device, gi));
@@ -721,28 +718,10 @@ TEST_F(RenderCoreTest, VoxelGIFieldAtlasCanAddressEverySupportedCell)
     sceneInputs = {};
 }
 
-// One frame of a scene that changes every frame, as an animated one does: the facade's commit
-// advances the geometry revision. Returns whether the frame's GI ray queries were ready.
-bool BuildChangedRayQueryFrame(RenderDevice* device, RenderScene& scene, VoxelGIRenderer& gi)
+// Capability fallback RT pipeline -> Compute -> PBR. An automatic HW tier that cannot build the scene
+// moves to Compute and stays there; an explicit HW tier reports the failure and the frame uses PBR.
+TEST_F(RenderCoreTest, AutomaticTierFallsBackFromHardwareToCompute)
 {
-    EXPECT_TRUE(scene.CommitGeometryUpdates());
-    RenderGraph& graph = *device->GetCurrentFrameRDG();
-    EXPECT_TRUE(graph.Begin());
-    const bool ready = gi.BuildRayQueryGraph();
-    graph.AddComputePass(IntentPass("keepalive"));
-    EXPECT_TRUE(graph.End()) << graph.GetResult().message;
-    EXPECT_TRUE(device->ExecuteRenderGraph(graph)) << graph.GetResult().message;
-    gi.OnVisibilityGraphExecuted(RenderFrameResult::eSubmitted);
-    gi.OnRenderGraphExecuted(RenderFrameResult::eSubmitted);
-    device->NextFrame();
-    return ready;
-}
-
-// Compute never builds or borrows HW RT, even on a capable device or immediately after HW use.
-// Explicit per-feature mixing stays intact; only the selected features may use HW queries.
-TEST_F(RenderCoreTest, ComputeFieldPreparationDoesNotBorrowHardware)
-{
-    using Feature         = VoxelGISettings::Feature;
     using Provider        = VoxelGISettings::RayProvider;
     sceneInputs.vertices  = Buffer(sizeof(asset::Vertex));
     sceneInputs.indices   = Buffer();
@@ -762,9 +741,124 @@ TEST_F(RenderCoreTest, ComputeFieldPreparationDoesNotBorrowHardware)
     VoxelGIRenderer gi(device, &volumes);
     gi.SetRenderScene(&scene);
     ASSERT_TRUE(gi.Init());
-    const uint32_t  allFeatures = (1u << static_cast<uint32_t>(Feature::Count)) - 1u;
     VoxelGISettings settings;
-    settings.SetAllFeatureProviders(Provider::Voxel);
+    settings.rayProvider = Provider::Hardware;
+    ASSERT_TRUE(gi.SetSettings(settings));
+    gi.SetAutomaticTier(true);
+
+    // The scene's acceleration-structure inputs fail to allocate: a persistent HW failure.
+    rhi->failBufferCreationAt = rhi->bufferCreations + 2;
+    EXPECT_FALSE(BuildRayQueryFrame(device, gi));
+    EXPECT_STREQ(gi.GetTierFallbackReason(), "scene_build_preparation_failed");
+    EXPECT_FALSE(gi.UsesHardwareQueries());
+    EXPECT_EQ(gi.GetHardwareFeatureMask(), 0u);
+    EXPECT_TRUE(gi.IsPreparingField());
+    EXPECT_STREQ(gi.GetProviderReason(), "field_preparing");
+    EXPECT_FALSE(gi.UsesHardwareShadows());
+    bool ready = false;
+    for (uint32_t frame = 0; frame < 16 && !ready; ++frame)
+    {
+        ready = BuildRayQueryFrame(device, gi);
+    }
+    ASSERT_TRUE(ready);
+    EXPECT_TRUE(gi.UsesFieldTraversal());
+    // The fallback is kept although HW could build now; it does not retry every frame.
+    const size_t builds = rhi->graphics.accelerationStructureBuildCounts.size();
+    ASSERT_TRUE(BuildRayQueryFrame(device, gi));
+    EXPECT_FALSE(gi.UsesHardwareQueries());
+    EXPECT_EQ(rhi->graphics.accelerationStructureBuildCounts.size(), builds);
+    EXPECT_STREQ(gi.GetTierFallbackReason(), "scene_build_preparation_failed");
+
+    // Choosing the HW tier explicitly retries it.
+    gi.SetAutomaticTier(false);
+    EXPECT_EQ(gi.GetTierFallbackReason(), nullptr);
+    ASSERT_TRUE(BuildRayQueryFrame(device, gi));
+    EXPECT_TRUE(gi.UsesHardwareQueries());
+    EXPECT_FALSE(gi.UsesFieldTraversal());
+
+    // An explicit HW tier that cannot build stays unavailable: PBR, with its reason, and no field.
+    gi.SetRenderScene(&scene);
+    rhi->failBufferCreationAt = rhi->bufferCreations + 2;
+    EXPECT_FALSE(BuildRayQueryFrame(device, gi));
+    EXPECT_EQ(gi.GetTierFallbackReason(), nullptr);
+    EXPECT_STREQ(gi.GetProviderReason(), "scene_build_preparation_failed");
+    EXPECT_FALSE(gi.UsesHardwareQueries());
+    EXPECT_FALSE(gi.IsPreparingField());
+    EXPECT_FALSE(gi.UsesFieldTraversal());
+    // The next frame retries the explicit tier.
+    ASSERT_TRUE(BuildRayQueryFrame(device, gi));
+    EXPECT_TRUE(gi.UsesHardwareQueries());
+
+    // A requested RT-pipeline tier without RT pipelines is a capability miss: Compute, no HW build.
+    gi.SetAutomaticTier(true);
+    settings.rayTracingPipeline = true;
+    ASSERT_TRUE(gi.SetSettings(settings));
+    rhi->info.rayTracing       = {};
+    const size_t beforeCompute = rhi->graphics.accelerationStructureBuildCounts.size();
+    EXPECT_FALSE(BuildRayQueryFrame(device, gi));
+    EXPECT_FALSE(gi.UsesHardwareQueries());
+    EXPECT_EQ(gi.GetHardwareFeatureMask(), 0u);
+    EXPECT_TRUE(gi.IsPreparingField());
+    EXPECT_EQ(gi.GetTierFallbackReason(), nullptr);
+    EXPECT_EQ(rhi->graphics.accelerationStructureBuildCounts.size(), beforeCompute);
+    // With capable RT pipelines, the same request selects the RT-pipeline HW tier.
+    rhi->info.rayTracing = {true, false, RHIShaderInvocationReorder::eNone, 32, 32, 64, 4096, 2, 1048576, 32};
+    ASSERT_TRUE(BuildRayQueryFrame(device, gi));
+    EXPECT_TRUE(gi.UsesHardwareQueries());
+    EXPECT_TRUE(gi.UsesRayTracingPipeline());
+    rhi->info.rayTracing = {};
+    gi.Destroy();
+    volumes.Destroy();
+    for (RHIBuffer* buffer :
+         {sceneInputs.vertices, sceneInputs.indices, sceneInputs.nodes, sceneInputs.materials, sceneInputs.uv})
+    {
+        device->DestroyBuffer(buffer);
+    }
+    sceneInputs = {};
+}
+
+// One frame of a scene that changes every frame, as an animated one does: the facade's commit
+// advances the geometry revision. Returns whether the frame's GI ray queries were ready.
+bool BuildChangedRayQueryFrame(RenderDevice* device, RenderScene& scene, VoxelGIRenderer& gi)
+{
+    EXPECT_TRUE(scene.CommitGeometryUpdates());
+    RenderGraph& graph = *device->GetCurrentFrameRDG();
+    EXPECT_TRUE(graph.Begin());
+    const bool ready = gi.BuildRayQueryGraph();
+    graph.AddComputePass(IntentPass("keepalive"));
+    EXPECT_TRUE(graph.End()) << graph.GetResult().message;
+    EXPECT_TRUE(device->ExecuteRenderGraph(graph)) << graph.GetResult().message;
+    gi.OnVisibilityGraphExecuted(RenderFrameResult::eSubmitted);
+    gi.OnRenderGraphExecuted(RenderFrameResult::eSubmitted);
+    device->NextFrame();
+    return ready;
+}
+
+// Compute never builds or borrows HW RT, even on a capable device or immediately after HW use.
+TEST_F(RenderCoreTest, ComputeFieldPreparationDoesNotBorrowHardware)
+{
+    using Provider        = VoxelGISettings::RayProvider;
+    sceneInputs.vertices  = Buffer(sizeof(asset::Vertex));
+    sceneInputs.indices   = Buffer();
+    sceneInputs.nodes     = Buffer();
+    sceneInputs.materials = Buffer();
+    sceneInputs.uv        = Buffer();
+    EnableDistanceFieldTestDevice(device);
+    rhi->info.rayQuery = {true, true, true, true, true, 256, 1024, 1024, 1024};
+    sg::Scene source;
+    source.GetAABB() = sg::AABB(Vec3(-1), Vec3(1));
+    SceneData data{};
+    data.pScene = &source;
+    RenderScene      scene(device, data);
+    TestVoxelVolumes volumes(device, DataFormat::eR8G8B8A8UNORM);
+    volumes.Init();
+    volumes.SetRenderScene(&scene);
+    VoxelGIRenderer gi(device, &volumes);
+    gi.SetRenderScene(&scene);
+    ASSERT_TRUE(gi.Init());
+    const uint32_t  allFeatures = 63u;
+    VoxelGISettings settings;
+    settings.rayProvider = Provider::Voxel;
     ASSERT_TRUE(gi.SetSettings(settings));
 
     // A capable device still prepares Compute without any acceleration-structure build.
@@ -790,16 +884,31 @@ TEST_F(RenderCoreTest, ComputeFieldPreparationDoesNotBorrowHardware)
     EXPECT_NE(visibility, 0u);
 
     // HW RT needs no field and keeps the published one; returning to Compute uses it at once.
-    rhi->info.rayQuery = {true, true, true, true, true, 256, 1024, 1024, 1024};
-    settings.SetAllFeatureProviders(Provider::Hardware);
+    rhi->info.rayQuery   = {true, true, true, true, true, 256, 1024, 1024, 1024};
+    settings.rayProvider = Provider::Hardware;
     ASSERT_TRUE(gi.SetSettings(settings));
     ASSERT_TRUE(BuildRayQueryFrame(device, gi));
     EXPECT_FALSE(gi.UsesFieldTraversal());
     EXPECT_EQ(gi.GetHardwareFeatureMask(), allFeatures);
     EXPECT_FALSE(gi.UsesVoxelLighting());
     EXPECT_EQ(gi.GetDistanceField()->GetState(), DistanceFieldScene::State::Ready);
-    const size_t builds = rhi->graphics.accelerationStructureBuildCounts.size();
-    settings.SetAllFeatureProviders(Provider::Voxel);
+    // A usable depth-one RT device cannot execute primary closest-hit shadow rays.
+    settings.rayTracingPipeline = true;
+    ASSERT_TRUE(gi.SetSettings(settings));
+    rhi->info.rayTracing = {true, false, RHIShaderInvocationReorder::eNone, 32, 32, 64, 4096, 1, 1048576, 32};
+    ASSERT_TRUE(rhi->info.rayTracing.IsUsable());
+    EXPECT_FALSE(gi.UsesRayTracingPipeline());
+    rhi->info.rayTracing.maxRayRecursionDepth = 2;
+    EXPECT_TRUE(gi.UsesRayTracingPipeline());
+    rhi->info.rayTracing.pipeline = false;
+    EXPECT_FALSE(gi.UsesRayTracingPipeline());
+    rhi->info.rayTracing.pipeline = true;
+    settings.rayTracingPipeline   = false;
+    ASSERT_TRUE(gi.SetSettings(settings));
+    EXPECT_FALSE(gi.UsesRayTracingPipeline());
+    rhi->info.rayTracing = {};
+    const size_t builds  = rhi->graphics.accelerationStructureBuildCounts.size();
+    settings.rayProvider = Provider::Voxel;
     ASSERT_TRUE(gi.SetSettings(settings));
     ASSERT_TRUE(BuildRayQueryFrame(device, gi));
     EXPECT_TRUE(gi.UsesFieldTraversal());
@@ -809,12 +918,11 @@ TEST_F(RenderCoreTest, ComputeFieldPreparationDoesNotBorrowHardware)
 
     // A geometry change keeps the published field, with the edited regions stale, while the next
     // generation builds from a snapshot; publishing it restarts the visibility histories.
-    settings.SetFeatureProvider(Feature::Sky, Provider::Hardware);
     ASSERT_TRUE(gi.SetSettings(settings));
     ASSERT_TRUE(BuildChangedRayQueryFrame(device, scene, gi));
     EXPECT_FALSE(gi.IsPreparingField());
     EXPECT_TRUE(gi.UsesFieldTraversal());
-    EXPECT_EQ(gi.GetHardwareFeatureMask(), 1u << static_cast<uint32_t>(Feature::Sky));
+    EXPECT_EQ(gi.GetHardwareFeatureMask(), 0u);
     EXPECT_FALSE(gi.GetDistanceField()->IsCurrent(scene));
     EXPECT_EQ(gi.GetVisibilityGeneration(), visibility);
     for (uint32_t frame = 0; frame < 8 && !gi.GetDistanceField()->IsCurrent(scene); ++frame)
@@ -825,7 +933,7 @@ TEST_F(RenderCoreTest, ComputeFieldPreparationDoesNotBorrowHardware)
     EXPECT_TRUE(gi.GetDistanceField()->IsCurrent(scene));
     EXPECT_NE(gi.GetVisibilityGeneration(), visibility);
     // Changing to a cold Compute field after HW use must not retain HW as a preview.
-    settings.SetAllFeatureProviders(Provider::Voxel);
+    settings.rayProvider     = Provider::Voxel;
     settings.fieldResolution = 32;
     ASSERT_TRUE(gi.SetSettings(settings));
     const size_t beforeCold = rhi->graphics.accelerationStructureBuildCounts.size();
@@ -835,21 +943,12 @@ TEST_F(RenderCoreTest, ComputeFieldPreparationDoesNotBorrowHardware)
     EXPECT_EQ(gi.GetHardwareFeatureMask(), 0u);
     EXPECT_EQ(rhi->graphics.accelerationStructureBuildCounts.size(), beforeCold);
     // Explicit HW unavailability does not silently select the field either.
-    settings.SetAllFeatureProviders(Provider::Hardware);
-    rhi->info.rayQuery = {};
+    settings.rayProvider = Provider::Hardware;
+    rhi->info.rayQuery   = {};
     ASSERT_TRUE(gi.SetSettings(settings));
     EXPECT_FALSE(BuildRayQueryFrame(device, gi));
     EXPECT_FALSE(gi.UsesFieldTraversal());
     EXPECT_FALSE(gi.IsPreparingField());
-    // An unavailable explicitly mixed HW pass must not be replaced by the cold Compute preview.
-    settings.SetAllFeatureProviders(Provider::Voxel);
-    settings.SetFeatureProvider(Feature::SpecularOcclusion, Provider::Hardware);
-    settings.fieldResolution = 64;
-    ASSERT_TRUE(gi.SetSettings(settings));
-    EXPECT_FALSE(BuildRayQueryFrame(device, gi));
-    EXPECT_FALSE(gi.IsPreparingField());
-    EXPECT_FALSE(gi.UsesHardwareQueries());
-    EXPECT_STRNE(gi.GetProviderReason(), "field_preparing");
     gi.Destroy();
     volumes.Destroy();
     for (RHIBuffer* buffer :

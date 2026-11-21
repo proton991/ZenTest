@@ -429,7 +429,7 @@ TEST_P(EditorRendering, PlayFirstFrameMatchesEditorForPBRDepthAndGI)
         settings.gi.resolution           = 64;
         settings.gi.shadowMapResolution  = 128;
         settings.gi.cone.fieldResolution = 32;
-        settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Voxel);
+        settings.gi.cone.rayProvider     = rc::VoxelGISettings::RayProvider::Voxel;
         ASSERT_TRUE(editor.StageRenderingSettings(settings, true));
         ASSERT_TRUE(editor.UpdateRenderingSettings());
         ASSERT_TRUE(FrameWithPreparedGI(device, editor));
@@ -513,10 +513,10 @@ TEST_P(EditorRendering, SceneCompositorRetainsAndLetterboxesWithoutSceneWork)
 TEST_P(EditorRendering, RendererStartsWithExplicitGIAndMarkerSettings)
 {
     rc::RenderingSettings initial;
-    initial.gi.resolution          = 64;
-    initial.gi.shadowMapResolution = 128;
-    initial.gi.cone.samples        = 1;
-    initial.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Voxel);
+    initial.gi.resolution              = 64;
+    initial.gi.shadowMapResolution     = 128;
+    initial.gi.cone.samples            = 1;
+    initial.gi.cone.rayProvider        = rc::VoxelGISettings::RayProvider::Voxel;
     initial.gi.cone.indirectIntensity  = 0.375f;
     initial.lightMarkers               = true;
     initial.lightMarkerSize            = 0.047f;
@@ -549,7 +549,7 @@ TEST_P(EditorRendering, PresentationOnlyFramesPreserveFrozenSceneAndRendererStat
         settings.gi.resolution           = 64;
         settings.gi.shadowMapResolution  = 128;
         settings.gi.cone.fieldResolution = 32;
-        settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Voxel);
+        settings.gi.cone.rayProvider     = rc::VoxelGISettings::RayProvider::Voxel;
         ASSERT_TRUE(editor.StageRenderingSettings(settings, true));
         ASSERT_TRUE(editor.UpdateRenderingSettings()) << editor.GetRenderingState().GetError();
         ASSERT_TRUE(FrameWithPreparedGI(device, editor));
@@ -1986,7 +1986,7 @@ TEST_P(EditorRendering, RenderingConfigurationLightsCameraAndResourceApply)
 
         EXPECT_EQ(editor.GetViewport().GetSnapshot().settings.resolution, grid);
 
-        // Light, environment, cone and output edits keep previewing while the grid waits for Apply.
+        // Light, environment, GI and output edits stay live while the grid waits for Apply.
         settings.environment.intensity           = 2.5f;
 
         settings.lights.front().light.intensity *= 0.5f;
@@ -2107,43 +2107,33 @@ TEST_P(EditorRendering, VoxelDebugShowsOpaqueSRGBAlbedoWithoutLighting)
 
     settings.cameraLight.enabled   = false;
 
-    for (const platform::VoxelizerMode mode : {platform::VoxelizerMode::eCompute, platform::VoxelizerMode::eGeometry})
+    ASSERT_TRUE(editor.StageRenderingSettings(settings, true));
+
+    ASSERT_TRUE(editor.UpdateRenderingSettings()) << editor.GetRenderingState().GetError();
+
+    // Check the initial volume build and the cached visualization on the next frame.
+    for (uint32_t frame = 0; frame < 2; ++frame)
     {
-        if (mode == platform::VoxelizerMode::eCompute || device->GetGPUInfo().supportGeometryShader)
-        {
-            SCOPED_TRACE(static_cast<int>(mode));
+        ASSERT_TRUE(Frame(*device, editor));
 
-            settings.gi.voxelizer = mode;
+        EXPECT_TRUE(editor.GetViewport().GetSnapshot().debug.available);
 
-            ASSERT_TRUE(editor.StageRenderingSettings(settings, true));
+        EXPECT_TRUE(device->GetCurrentFrameRDG()->GetWarnings().empty());
 
-            ASSERT_TRUE(editor.UpdateRenderingSettings()) << editor.GetRenderingState().GetError();
+        const HeapVector<uint8_t> pixels = ReadScenePixels(*device, editor.GetViewport().GetRenderView().color);
 
-            // Check the initial volume build and the cached visualization on the next frame.
-            for (uint32_t frame = 0; frame < 2; ++frame)
-            {
-                ASSERT_TRUE(Frame(*device, editor));
+        ASSERT_EQ(pixels.size(), 96u * 64 * 4);
 
-                EXPECT_TRUE(editor.GetViewport().GetSnapshot().debug.available);
+        const size_t center = (32 * 96 + 48) * 4;
 
-                EXPECT_TRUE(device->GetCurrentFrameRDG()->GetWarnings().empty());
+        // The fixture's linear base color is (0.7, 0.35, 0.1).
+        EXPECT_NEAR(pixels[center], 218, 2);
 
-                const HeapVector<uint8_t> pixels = ReadScenePixels(*device, editor.GetViewport().GetRenderView().color);
+        EXPECT_NEAR(pixels[center + 1], 160, 2);
 
-                ASSERT_EQ(pixels.size(), 96u * 64 * 4);
+        EXPECT_NEAR(pixels[center + 2], 89, 2);
 
-                const size_t center = (32 * 96 + 48) * 4;
-
-                // The fixture's linear base color is (0.7, 0.35, 0.1).
-                EXPECT_NEAR(pixels[center], 218, 2);
-
-                EXPECT_NEAR(pixels[center + 1], 160, 2);
-
-                EXPECT_NEAR(pixels[center + 2], 89, 2);
-
-                EXPECT_EQ(pixels[center + 3], 255);
-            }
-        }
+        EXPECT_EQ(pixels[center + 3], 255);
     }
 
     DestroyDevice(*device, editor);
@@ -2166,16 +2156,19 @@ TEST_P(EditorRendering, DebugOutputsRetireAcrossModeSceneAndExtentChanges)
 
     ASSERT_TRUE(editor.ResizeViewport(96, 64));
 
-    rc::RenderingSettings settings  = editor.GetRenderingState().GetDraft();
+    rc::RenderingSettings settings          = editor.GetRenderingState().GetDraft();
 
-    settings.algorithm              = rc::RenderAlgorithm::ePBR;
+    settings.algorithm                      = rc::RenderAlgorithm::ePBR;
 
-    settings.gi.resolution          = 64;
+    settings.gi.resolution                  = 64;
 
-    settings.gi.shadowMapResolution = 128;
+    settings.gi.shadowMapResolution         = 128;
 
-    // The rejection view reports per-pixel gather reasons; screen probes have none.
-    settings.gi.cone.gather                = rc::VoxelGISettings::Gather::Pixel;
+    settings.gi.cone.pixelResolutionDivisor = 2;
+    settings.environment.lighting           = true;
+
+    // The rejection view reports pixel GI history rejection reasons.
+    rc::SetGIMethod(settings.gi.cone, rc::GIMethod::Pixel);
 
     settings.debug.lightId                 = settings.lights.front().id;
 
@@ -2255,6 +2248,14 @@ TEST_P(EditorRendering, DebugOutputsRetireAcrossModeSceneAndExtentChanges)
         const HeapVector<uint8_t> pixels = ReadScenePixels(*device, editor.GetViewport().GetRenderView().color);
 
         EXPECT_EQ(pixels.size(), 96u * 64 * 4);
+
+        if (output == rc::DebugOutput::eGIReconstructedSky)
+        {
+            // Output-resolution signals must sample reduced history with its own UV scale.
+            // At this pixel, output coordinates already lie outside the half-resolution history.
+            const size_t center = (32 * 96 + 48) * 4;
+            EXPECT_GT(std::max({pixels[center], pixels[center + 1], pixels[center + 2]}), 0);
+        }
 
         if (output == rc::DebugOutput::eGIHistoryLength || output == rc::DebugOutput::eGIRejection)
         {
@@ -2642,7 +2643,7 @@ uint64_t PixelEnergy(const HeapVector<uint8_t>& pixels)
     return sum;
 }
 
-TEST_P(EditorRendering, LightingBackendsSwitchIndependently)
+TEST_P(EditorRendering, LightingTiersSwitchWithoutMixedProviders)
 {
     UniquePtr<rc::RenderDevice> device = CreateDevice(GetParam(), true);
     EditorController            editor(*device);
@@ -2656,22 +2657,14 @@ TEST_P(EditorRendering, LightingBackendsSwitchIndependently)
     settings.gi.resolution          = 64;
     settings.gi.shadowMapResolution = 128;
     settings.gi.cone                = rc::VoxelGISettings{};
-    const bool     hardware         = device->GetGPUInfo().rayQuery.IsUsable();
-    const uint32_t featureCount     = static_cast<uint32_t>(rc::VoxelGISettings::Feature::Count);
-    // All compute, each feature alone on hardware, all hardware, then back to compute.
-    for (uint32_t frame = 0; frame < featureCount + 3; ++frame)
+    const bool hardware             = device->GetGPUInfo().rayQuery.IsUsable();
+    // Compute, HW RT when available, then back to the retained Compute field.
+    for (uint32_t frame = 0; frame < 3; ++frame)
     {
         SCOPED_TRACE(frame);
-        settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Voxel);
-        if (frame >= 1 && frame <= featureCount)
-        {
-            settings.gi.cone.SetFeatureProvider(static_cast<rc::VoxelGISettings::Feature>(frame - 1),
-                                                rc::VoxelGISettings::RayProvider::Hardware);
-        }
-        else if (frame == featureCount + 1)
-        {
-            settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Hardware);
-        }
+        const bool hardwareTier = hardware && frame == 1;
+        settings.gi.cone.rayProvider =
+            hardwareTier ? rc::VoxelGISettings::RayProvider::Hardware : rc::VoxelGISettings::RayProvider::Voxel;
         ASSERT_TRUE(editor.StageRenderingSettings(settings, true));
         ASSERT_TRUE(editor.UpdateRenderingSettings()) << editor.GetRenderingState().GetError();
         ASSERT_TRUE(Frame(*device, editor));
@@ -2685,13 +2678,12 @@ TEST_P(EditorRendering, LightingBackendsSwitchIndependently)
         ASSERT_FALSE(gi.IsPreparingField());
         EXPECT_EQ(server.GetRenderOption(), rc::RenderOption::eVoxelGI);
         EXPECT_EQ(gi.GetHardwareFeatureMask(), hardware ? settings.gi.cone.GetHardwareFeatureMask() : 0u);
-        EXPECT_EQ(gi.UsesHardwareShadows(), hardware && (frame == featureCount || frame == featureCount + 1));
-        EXPECT_TRUE(gi.UsesRayBounce());
+        EXPECT_EQ(gi.UsesHardwareShadows(), hardwareTier);
         // Compute direct shadows use maps.
         EXPECT_EQ(gi.UsesRayShadows(), gi.UsesHardwareShadows());
         EXPECT_TRUE(gi.UsesReflections());
         // Hardware frames retain a prepared field for a later Compute selection.
-        EXPECT_EQ(gi.UsesFieldTraversal(), !hardware || frame != featureCount + 1);
+        EXPECT_EQ(gi.UsesFieldTraversal(), !hardwareTier);
         ASSERT_NE(gi.GetDistanceField(), nullptr);
         EXPECT_EQ(gi.GetDistanceField()->GetState(), rc::DistanceFieldScene::State::Ready);
     }
@@ -2703,8 +2695,7 @@ bool RenderUntilComputeReady(rc::RenderDevice&          device,
                              const rc::VoxelGISettings& requested,
                              std::ofstream&             csv,
                              const char*                stage,
-                             bool                       hardwareWhilePreparing = true,
-                             uint32_t*                  framesToReady          = nullptr)
+                             uint32_t*                  framesToReady = nullptr)
 {
     const std::chrono::steady_clock::time_point start    = std::chrono::steady_clock::now();
     const std::chrono::steady_clock::time_point deadline = start + std::chrono::seconds(180);
@@ -2722,9 +2713,10 @@ bool RenderUntilComputeReady(rc::RenderDevice&          device,
         EXPECT_EQ(gi.GetSettings(), requested);
         if (pending)
         {
-            EXPECT_EQ(gi.GetHardwareFeatureMask() != 0, hardwareWhilePreparing);
-            EXPECT_EQ(device.GetRendererServer()->GetRenderOption(), rc::RenderOption::eVoxelGI);
-            EXPECT_TRUE(device.GetRendererServer()->GetRenderingStatus().fallbackReason.empty());
+            EXPECT_EQ(gi.GetHardwareFeatureMask(), 0u);
+            EXPECT_EQ(device.GetRendererServer()->GetRenderOption(), rc::RenderOption::ePBR);
+            EXPECT_NE(device.GetRendererServer()->GetRenderingStatus().fallbackReason.find("Preparing Compute GI"),
+                      std::string::npos);
         }
         ready = !pending && gi.GetHardwareFeatureMask() == 0;
         if (csv.is_open())
@@ -2771,7 +2763,7 @@ bool OpenGITimingCsv(std::ofstream& csv, RHIExecutionMode mode, const char* suff
     return path == nullptr || csv.is_open();
 }
 
-TEST_P(EditorRendering, ColdComputeGIShowsBounceBeforeFieldPublication)
+TEST_P(EditorRendering, ColdComputeGIUsesPBRUntilFieldPublication)
 {
     EditorRenderingScope scope(GetParam());
     rc::RenderDevice&    device = *scope.device;
@@ -2783,12 +2775,12 @@ TEST_P(EditorRendering, ColdComputeGIShowsBounceBeforeFieldPublication)
         // Each sample opens a fresh scene, so both images are the first GI frame.
         ASSERT_TRUE(editor.Load(Fixture("shadow_toggle.gltf")));
         ASSERT_TRUE(editor.ResizeViewport(128, 96));
-        rc::RenderingSettings settings  = editor.GetRenderingState().GetDraft();
-        settings.algorithm              = rc::RenderAlgorithm::eVoxelGI;
-        settings.debug.output           = rc::DebugOutput::eFinal;
-        settings.gi.resolution          = 64;
-        settings.gi.shadowMapResolution = 128;
-        settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Voxel);
+        rc::RenderingSettings settings     = editor.GetRenderingState().GetDraft();
+        settings.algorithm                 = rc::RenderAlgorithm::eVoxelGI;
+        settings.debug.output              = rc::DebugOutput::eFinal;
+        settings.gi.resolution             = 64;
+        settings.gi.shadowMapResolution    = 128;
+        settings.gi.cone.rayProvider       = rc::VoxelGISettings::RayProvider::Voxel;
         settings.gi.cone.indirectIntensity = float(sample);
         settings.environment.intensity     = 0;
         settings.environment.skybox        = false;
@@ -2805,16 +2797,17 @@ TEST_P(EditorRendering, ColdComputeGIShowsBounceBeforeFieldPublication)
         ASSERT_TRUE(gi.IsPreparingField());
         EXPECT_FALSE(gi.UsesFieldTraversal());
         EXPECT_FALSE(gi.UsesHardwareQueries());
-        EXPECT_EQ(server.GetRenderOption(), rc::RenderOption::eVoxelGI);
-        EXPECT_TRUE(server.GetRenderingStatus().fallbackReason.empty());
-        EXPECT_GT(gi.GetRadianceGeneration(), 0u);
+        EXPECT_EQ(server.GetRenderOption(), rc::RenderOption::ePBR);
+        EXPECT_EQ(server.GetRenderingStatus().fallbackReason.empty(), !gi.IsPreparingField());
+        EXPECT_EQ(gi.GetRadianceGeneration(), 0u);
         const HeapVector<uint8_t> pixels = ReadScenePixels(device, editor.GetViewport().GetRenderView().color);
         for (size_t index = 0; index < pixels.size(); ++index)
         {
             brightness[sample] += index % 4 != 3 ? pixels[index] : 0;
         }
     }
-    EXPECT_GT(brightness[1], brightness[0]);
+    EXPECT_GT(brightness[0], 0u);
+    EXPECT_EQ(brightness[1], brightness[0]);
 }
 
 TEST_P(EditorRendering, ComputeSceneReplacementKeepsRenderingWhilePreparingGeometry)
@@ -2827,33 +2820,37 @@ TEST_P(EditorRendering, ComputeSceneReplacementKeepsRenderingWhilePreparingGeome
     const char* nextPath     = std::getenv("ZEN_EDITOR_GI_SWITCH_SCENE");
     ASSERT_TRUE(editor.Load(previousPath != nullptr ? std::string(previousPath) : Fixture("shadow_toggle.gltf")));
     ASSERT_TRUE(editor.ResizeViewport(nextPath != nullptr ? 1600 : 96, nextPath != nullptr ? 900 : 64));
-    rc::RenderingSettings settings  = editor.GetRenderingState().GetDraft();
-    settings.algorithm              = rc::RenderAlgorithm::eVoxelGI;
-    settings.debug.output           = rc::DebugOutput::eFinal;
-    settings.gi.resolution          = 64;
-    settings.gi.shadowMapResolution = nextPath != nullptr ? 1024 : 128;
-    settings.gi.cone                = rc::VoxelGISettings{};
-    settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Voxel);
-    settings.gi.cone.SetFeatureProvider(rc::VoxelGISettings::Feature::Shadows, rc::VoxelGISettings::RayProvider::Auto);
-    settings.gi.cone.samples          = 1;
-    settings.gi.cone.adaptiveSampling = false;
-    settings.gi.cone.fieldResolution  = 64;
-    settings.gi.cone.gather           = rc::VoxelGISettings::Gather::Probes;
+    rc::RenderingSettings settings          = editor.GetRenderingState().GetDraft();
+    settings.algorithm                      = rc::RenderAlgorithm::eVoxelGI;
+    settings.debug.output                   = rc::DebugOutput::eFinal;
+    settings.gi.resolution                  = 64;
+    settings.gi.shadowMapResolution         = nextPath != nullptr ? 1024 : 128;
+    settings.gi.cone                        = rc::VoxelGISettings{};
+    settings.gi.cone.rayProvider            = rc::VoxelGISettings::RayProvider::Voxel;
+
+    settings.gi.cone.samples                = 1;
+    settings.gi.cone.fieldResolution        = 64;
+    settings.gi.cone.pixelResolutionDivisor = 2;
     ASSERT_TRUE(editor.StageRenderingSettings(settings, true));
     ASSERT_TRUE(editor.UpdateRenderingSettings());
     rc::RendererServer&  server = *device.GetRendererServer();
     rc::VoxelGIRenderer& gi     = *server.RequestVoxelGI();
     ASSERT_TRUE(Frame(device, editor));
     EXPECT_TRUE(gi.IsPreparingField());
-    EXPECT_EQ(server.GetRenderOption(), rc::RenderOption::eVoxelGI);
+    EXPECT_EQ(server.GetRenderOption(), rc::RenderOption::ePBR);
     EXPECT_FALSE(gi.UsesHardwareQueries());
     EXPECT_EQ(server.RequestDeferredLightingRenderer()->GetHybridGI(), nullptr);
-    EXPECT_GT(gi.GetRadianceGeneration(), 0u);
+    EXPECT_EQ(gi.GetRadianceGeneration(), 0u);
     std::ofstream csv;
     ASSERT_TRUE(OpenGITimingCsv(csv, GetParam(), ".scene-switch"));
-    ASSERT_TRUE(RenderUntilComputeReady(device, editor, settings.gi.cone, csv, "initial", false));
+    ASSERT_TRUE(RenderUntilComputeReady(device, editor, settings.gi.cone, csv, "initial"));
+    const rc::RenderView& view = editor.GetViewport().GetRenderView();
+    const glm::uvec2      expectedGI((view.width + 1) / 2, (view.height + 1) / 2);
+    ASSERT_NE(server.RequestDeferredLightingRenderer()->GetHybridGI(), nullptr);
+    EXPECT_EQ(server.RequestDeferredLightingRenderer()->GetHybridGI()->GetGIExtent(), expectedGI);
 
-    const uint64_t generation = editor.GetScene().GetGeneration();
+    const uint64_t generation       = editor.GetScene().GetGeneration();
+    const uint64_t previousRadiance = gi.GetRadianceGeneration();
     ASSERT_TRUE(editor.RequestLoad(nextPath != nullptr ? std::string(nextPath) : Fixture("inspection.gltf")));
     const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(180);
     while (editor.GetLoadState().IsActive() && std::chrono::steady_clock::now() < deadline)
@@ -2874,20 +2871,22 @@ TEST_P(EditorRendering, ComputeSceneReplacementKeepsRenderingWhilePreparingGeome
         }
         if (previousStage == SceneLoadStage::Publishing)
         {
-            // The replacement gets its own voxel GI preview while its field builds.
+            // The replacement renders PBR while its field builds.
             EXPECT_TRUE(gi.IsPreparingField());
             EXPECT_EQ(gi.GetVisibilityGeneration(), 0u);
-            EXPECT_EQ(server.GetRenderOption(), rc::RenderOption::eVoxelGI);
+            EXPECT_EQ(server.GetRenderOption(), rc::RenderOption::ePBR);
             EXPECT_EQ(server.RequestDeferredLightingRenderer()->GetHybridGI(), nullptr);
-            EXPECT_GT(gi.GetRadianceGeneration(), 0u);
+            EXPECT_EQ(gi.GetRadianceGeneration(), previousRadiance);
         }
         EXPECT_EQ(gi.GetSettings(), settings.gi.cone);
-        EXPECT_TRUE(server.GetRenderingStatus().fallbackReason.empty());
+        EXPECT_EQ(server.GetRenderingStatus().fallbackReason.empty(), !gi.IsPreparingField());
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     ASSERT_EQ(editor.GetLoadState().stage, SceneLoadStage::Idle) << editor.GetError();
     ASSERT_EQ(editor.GetScene().GetGeneration(), generation + 1);
-    ASSERT_TRUE(RenderUntilComputeReady(device, editor, settings.gi.cone, csv, "replacement", false));
+    ASSERT_TRUE(RenderUntilComputeReady(device, editor, settings.gi.cone, csv, "replacement"));
+    ASSERT_NE(server.RequestDeferredLightingRenderer()->GetHybridGI(), nullptr);
+    EXPECT_EQ(server.RequestDeferredLightingRenderer()->GetHybridGI()->GetGIExtent(), expectedGI);
     EXPECT_EQ(server.GetRenderOption(), rc::RenderOption::eVoxelGI);
     EXPECT_TRUE(Frame(device, editor));
     EXPECT_FALSE(gi.IsPreparingField());
@@ -2903,20 +2902,17 @@ TEST_P(EditorRendering, ColdHardwareToComputeSwitchKeepsRenderingUntilReady)
         const char* scenePath = std::getenv("ZEN_EDITOR_GI_SWITCH_SCENE");
         ASSERT_TRUE(editor.Load(scenePath != nullptr ? std::string(scenePath) : Fixture("shadow_toggle.gltf")));
         ASSERT_TRUE(editor.ResizeViewport(scenePath != nullptr ? 1600 : 96, scenePath != nullptr ? 900 : 64));
-        rc::RenderingSettings settings  = editor.GetRenderingState().GetDraft();
-        settings.algorithm              = rc::RenderAlgorithm::eVoxelGI;
-        settings.debug.output           = rc::DebugOutput::eFinal;
-        settings.gi.resolution          = 64;
-        settings.gi.shadowMapResolution = scenePath != nullptr ? 1024 : 128;
-        settings.gi.cone                = rc::VoxelGISettings{};
-        settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Hardware);
-        settings.gi.cone.featureProviders[static_cast<size_t>(rc::VoxelGISettings::Feature::Shadows)] =
-            rc::VoxelGISettings::RayProvider::Auto;
-        settings.gi.cone.rtShadows        = true;
-        settings.gi.cone.samples          = 1;
-        settings.gi.cone.adaptiveSampling = false;
-        settings.gi.cone.fieldResolution  = 64;
-        settings.gi.cone.gather           = rc::VoxelGISettings::Gather::Probes;
+        rc::RenderingSettings settings   = editor.GetRenderingState().GetDraft();
+        settings.algorithm               = rc::RenderAlgorithm::eVoxelGI;
+        settings.debug.output            = rc::DebugOutput::eFinal;
+        settings.gi.resolution           = 64;
+        settings.gi.shadowMapResolution  = scenePath != nullptr ? 1024 : 128;
+        settings.gi.cone                 = rc::VoxelGISettings{};
+        settings.gi.cone.rayProvider     = rc::VoxelGISettings::RayProvider::Hardware;
+
+        settings.gi.cone.rtShadows       = true;
+        settings.gi.cone.samples         = 1;
+        settings.gi.cone.fieldResolution = 64;
         ASSERT_TRUE(editor.StageRenderingSettings(settings, true));
         ASSERT_TRUE(editor.UpdateRenderingSettings()) << editor.GetRenderingState().GetError();
         ASSERT_TRUE(Frame(*device, editor));
@@ -2932,179 +2928,28 @@ TEST_P(EditorRendering, ColdHardwareToComputeSwitchKeepsRenderingUntilReady)
         ASSERT_TRUE(OpenGITimingCsv(csv, GetParam()));
         // Match the editor's global Compute control while retaining inherited map shadows.
         settings.gi.cone.rayProvider = rc::VoxelGISettings::RayProvider::Voxel;
-        settings.gi.cone.featureProviders.fill(rc::VoxelGISettings::RayProvider::Voxel);
-        settings.gi.cone.featureProviders[static_cast<size_t>(rc::VoxelGISettings::Feature::Shadows)] =
-            rc::VoxelGISettings::RayProvider::Auto;
+
         ASSERT_TRUE(editor.StageRenderingSettings(settings, true));
         ASSERT_TRUE(editor.UpdateRenderingSettings()) << editor.GetRenderingState().GetError();
-        // Compute never borrows HW RT during field preparation: the cold switch shows the coarse
-        // Compute preview, not the previously selected hardware backend.
-        ASSERT_TRUE(RenderUntilComputeReady(*device, editor, settings.gi.cone, csv, "cold", false));
-        const uint64_t generation = gi.GetDistanceField()->GetGeneration();
+        // Cold Compute preparation renders PBR and environment lighting while construction progresses.
+        ASSERT_TRUE(RenderUntilComputeReady(*device, editor, settings.gi.cone, csv, "cold"));
+        const uint64_t generation    = gi.GetDistanceField()->GetGeneration();
 
-        settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Hardware);
+        settings.gi.cone.rayProvider = rc::VoxelGISettings::RayProvider::Hardware;
         ASSERT_TRUE(editor.StageRenderingSettings(settings, true));
         ASSERT_TRUE(editor.UpdateRenderingSettings());
         ASSERT_TRUE(Frame(*device, editor));
         EXPECT_TRUE(gi.UsesHardwareShadows());
         EXPECT_EQ(gi.GetDistanceField()->GetGeneration(), generation);
-        settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Voxel);
-        settings.gi.cone.SetFeatureProvider(rc::VoxelGISettings::Feature::Shadows, rc::VoxelGISettings::RayProvider::Auto);
+        settings.gi.cone.rayProvider = rc::VoxelGISettings::RayProvider::Voxel;
+
         ASSERT_TRUE(editor.StageRenderingSettings(settings, true));
         ASSERT_TRUE(editor.UpdateRenderingSettings());
         // A warm switch reuses the published field: no rebuild, effective within two submitted frames.
         uint32_t warmFrames = 0;
-        ASSERT_TRUE(RenderUntilComputeReady(*device, editor, settings.gi.cone, csv, "warm", true, &warmFrames));
+        ASSERT_TRUE(RenderUntilComputeReady(*device, editor, settings.gi.cone, csv, "warm", &warmFrames));
         EXPECT_LE(warmFrames, 2u);
         EXPECT_EQ(gi.GetDistanceField()->GetGeneration(), generation);
-    }
-    DestroyDevice(*device, editor);
-}
-
-// Reconstructed diffuse sky of one gather configuration, rendered through the debug view.
-struct ProbeGatherCase
-{
-    const char*                      name;
-    rc::VoxelGISettings::Gather      gather;
-    rc::VoxelGISettings::RayProvider provider;
-};
-
-HeapVector<uint8_t> RenderReconstructedSky(rc::RenderDevice&      device,
-                                           EditorController&      editor,
-                                           rc::RenderingSettings  settings,
-                                           const ProbeGatherCase& gatherCase,
-                                           uint32_t               frames)
-{
-    settings.gi.cone.SetAllFeatureProviders(gatherCase.provider);
-    settings.gi.cone.gather = gatherCase.gather;
-    HeapVector<uint8_t> pixels;
-    bool                valid = editor.StageRenderingSettings(settings, true) && editor.UpdateRenderingSettings();
-    EXPECT_TRUE(valid) << editor.GetRenderingState().GetError();
-    // Compute cases wait for the scene's distance field before the measured frames.
-    valid = valid && FrameWithPreparedGI(device, editor);
-    for (uint32_t frame = 0; frame < frames && valid; ++frame)
-    {
-        valid = Frame(device, editor);
-        EXPECT_TRUE(valid);
-    }
-    if (valid)
-    {
-        const rc::HybridGIRenderer* hybrid = device.GetRendererServer()->RequestDeferredLightingRenderer()->GetHybridGI();
-        EXPECT_NE(hybrid, nullptr);
-        if (hybrid != nullptr)
-        {
-            EXPECT_EQ(hybrid->UsesScreenProbes(), gatherCase.gather == rc::VoxelGISettings::Gather::Probes);
-        }
-        const rc::DebugOutputDescription description = editor.GetViewport().GetSnapshot().debug;
-        EXPECT_TRUE(description.available) << description.reason;
-        pixels = ReadScenePixels(device, editor.GetViewport().GetRenderView().color);
-    }
-    const char* captureDirectory = std::getenv("ZEN_EDITOR_PROBE_CAPTURE_DIR");
-    if (captureDirectory != nullptr && !pixels.empty())
-    {
-        const rc::RenderView& view = editor.GetViewport().GetRenderView();
-        std::ofstream         capture(std::filesystem::path(captureDirectory) / (std::string(gatherCase.name) + ".ppm"),
-                                      std::ios::binary);
-        capture << "P6\n" << view.width << " " << view.height << "\n255\n";
-        for (size_t index = 0; index < pixels.size(); index += 4)
-        {
-            capture.write(reinterpret_cast<const char*>(pixels.data() + index), 3);
-        }
-    }
-    return pixels;
-}
-
-// Screen probes trace the scene with each provider and reconstruct the same diffuse sky as the
-// per-pixel gather. The column and sphere make neighbouring probes disagree in plane and normal:
-// receivers a reconstruction leaves uncovered show up as dark holes against the per-pixel result.
-TEST_P(EditorRendering, ScreenProbeGatherTracksPixelGatherOnCurvedGeometry)
-{
-    UniquePtr<rc::RenderDevice> device = CreateDevice(GetParam(), true);
-    EditorController            editor(*device);
-    ASSERT_TRUE(editor.Init());
-    ASSERT_TRUE(editor.Load(Fixture("probe_curved.gltf")));
-    constexpr uint32_t kWidth = 160, kHeight = 120;
-    ASSERT_TRUE(editor.ResizeViewport(kWidth, kHeight));
-    editor.GetCamera().GetCamera().SetPose(Vec3(0, -0.75f, 0.55f), Vec3(0, 0, 0.05f));
-    rc::RenderingSettings settings = editor.GetRenderingState().GetDraft();
-    settings.algorithm             = rc::RenderAlgorithm::eVoxelGI;
-    settings.debug.output          = rc::DebugOutput::eGIReconstructedSky;
-    settings.lights.clear();
-    settings.lightMarkers             = false;
-    settings.cameraLight.enabled      = false;
-    settings.environment.skybox       = false;
-    settings.gi.resolution            = 64;
-    settings.gi.shadowMapResolution   = 128;
-    settings.gi.cone                  = rc::VoxelGISettings{};
-    HeapVector<ProbeGatherCase> cases = {
-        {"pixel-field", rc::VoxelGISettings::Gather::Pixel, rc::VoxelGISettings::RayProvider::Voxel},
-        {"probes-field", rc::VoxelGISettings::Gather::Probes, rc::VoxelGISettings::RayProvider::Voxel}};
-    if (device->GetGPUInfo().rayQuery.IsUsable())
-    {
-        cases.push_back({"probes-hardware", rc::VoxelGISettings::Gather::Probes, rc::VoxelGISettings::RayProvider::Hardware});
-        cases.push_back({"pixel-hardware", rc::VoxelGISettings::Gather::Pixel, rc::VoxelGISettings::RayProvider::Hardware});
-    }
-    const HeapVector<uint8_t> reference = RenderReconstructedSky(*device, editor, settings, cases[0], 48);
-    EXPECT_EQ(reference.size(), size_t(kWidth) * kHeight * 4);
-    for (size_t index = 1; index < cases.size() && reference.size() == size_t(kWidth) * kHeight * 4; ++index)
-    {
-        SCOPED_TRACE(cases[index].name);
-        HeapVector<uint8_t> probes = RenderReconstructedSky(*device, editor, settings, cases[index], 48);
-        EXPECT_EQ(probes.size(), reference.size());
-        probes.resize(reference.size());
-        EXPECT_EQ(device->GetRendererServer()->RequestVoxelGI()->UsesFieldTraversal(),
-                  cases[index].provider == rc::VoxelGISettings::RayProvider::Voxel);
-        // Receivers with a clearly lit reference; background and deep contact shadow are excluded.
-        double   referenceSum = 0.0, probeSum = 0.0, absoluteSum = 0.0;
-        uint32_t receivers = 0, holes = 0, clipped = 0;
-        for (size_t pixel = 0; pixel < reference.size(); pixel += 4)
-        {
-            const double expected = (reference[pixel] + reference[pixel + 1] + reference[pixel + 2]) / 3.0;
-            const double actual   = (probes[pixel] + probes[pixel + 1] + probes[pixel + 2]) / 3.0;
-            if (expected >= 24.0)
-            {
-                ++receivers;
-                referenceSum += expected;
-                probeSum     += actual;
-                absoluteSum  += std::abs(actual - expected);
-                holes        += actual < 0.5 * expected ? 1u : 0u;
-                clipped      += expected >= 254.0 ? 1u : 0u;
-            }
-        }
-        // A third of the view is lit receivers; failures keep going so the device is always destroyed.
-        EXPECT_GT(receivers, kWidth * kHeight / 3);
-        const double                    bias       = (probeSum - referenceSum) / std::max(referenceSum, 1.0);
-        const double                    difference = absoluteSum / std::max(referenceSum, 1.0);
-        const double                    holeShare  = double(holes) / std::max(receivers, 1u);
-        const rc::ScreenProbeStatistics probeCounts =
-            device->GetRendererServer()->RequestDeferredLightingRenderer()->GetHybridGI()->GetScreenProbeStatistics();
-        std::printf("%s: receivers %u, sRGB mean bias %.4f, mean |difference| %.4f, holes %.4f, clipped %u, "
-                    "probes %u uniform, %u of %u requested adaptive\n",
-                    cases[index].name, receivers, bias, difference, holeShare, clipped, probeCounts.uniformProbes,
-                    probeCounts.adaptiveAllocated, probeCounts.adaptiveRequested);
-        EXPECT_LT(clipped, receivers / 10);
-        EXPECT_LT(std::abs(bias), 0.04);
-        EXPECT_LT(difference, 0.06);
-        EXPECT_LT(holeShare, 0.01);
-    }
-    // Raw debug views retain reconstruction passes that normal fused rendering culls.
-    settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Voxel);
-    settings.gi.cone.gather = rc::VoxelGISettings::Gather::Probes;
-    for (rc::DebugOutput output : {rc::DebugOutput::eGIRawSky, rc::DebugOutput::eGIHitMiss})
-    {
-        settings.debug.output = output;
-        const bool applied    = editor.StageRenderingSettings(settings, true) && editor.UpdateRenderingSettings();
-        EXPECT_TRUE(applied) << editor.GetRenderingState().GetError();
-        const bool rendered = applied && FrameWithPreparedGI(*device, editor);
-        EXPECT_TRUE(rendered);
-        if (rendered)
-        {
-            const rc::DebugOutputDescription description = editor.GetViewport().GetSnapshot().debug;
-            EXPECT_TRUE(description.available) << description.reason;
-            EXPECT_EQ(description.output, output);
-            const HeapVector<uint8_t> pixels = ReadScenePixels(*device, editor.GetViewport().GetRenderView().color);
-            EXPECT_EQ(pixels.size(), size_t(kWidth) * kHeight * 4);
-        }
     }
     DestroyDevice(*device, editor);
 }
@@ -3124,7 +2969,7 @@ TEST_P(EditorRendering, ShadowPreflightFollowsRayOrMapSelection)
     settings.gi.resolution          = 64;
     settings.gi.shadowMapResolution = 128;
     settings.gi.cone                = rc::VoxelGISettings{};
-    settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Hardware);
+    settings.gi.cone.rayProvider    = rc::VoxelGISettings::RayProvider::Hardware;
 
     // An impossible map-array size makes the map preflight fail deterministically,
     // without exhausting physical VRAM. Unavailable hardware shadows need the fallback map array.
@@ -3153,7 +2998,7 @@ TEST_P(EditorRendering, ShadowPreflightFollowsRayOrMapSelection)
     settings.gi.cone.rtShadows = false;
     EXPECT_FALSE(server.ValidateShadowResources(settings, rejectedFaces));
     settings.gi.cone.rtShadows = true;
-    settings.gi.cone.SetFeatureProvider(rc::VoxelGISettings::Feature::Shadows, rc::VoxelGISettings::RayProvider::Auto);
+
     for (rc::VoxelGISettings::RayProvider provider :
          {rc::VoxelGISettings::RayProvider::Voxel, rc::VoxelGISettings::RayProvider::Hardware,
           rc::VoxelGISettings::RayProvider::Auto})
@@ -3163,11 +3008,13 @@ TEST_P(EditorRendering, ShadowPreflightFollowsRayOrMapSelection)
                   hardware && provider != rc::VoxelGISettings::RayProvider::Voxel);
     }
     // Compute direct shadows use shadow maps, so they need the map array.
-    settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Hardware);
-    settings.gi.cone.SetFeatureProvider(rc::VoxelGISettings::Feature::Shadows, rc::VoxelGISettings::RayProvider::Voxel);
+    settings.gi.cone.rayProvider = rc::VoxelGISettings::RayProvider::Hardware;
+    settings.gi.cone.rtShadows   = false;
     EXPECT_FALSE(server.ValidateShadowResources(settings, rejectedFaces));
-    settings.gi.cone.SetAllFeatureProviders(rc::VoxelGISettings::RayProvider::Voxel);
-    settings.gi.cone.SetFeatureProvider(rc::VoxelGISettings::Feature::Shadows, rc::VoxelGISettings::RayProvider::Hardware);
+    settings.gi.cone.rayProvider = rc::VoxelGISettings::RayProvider::Voxel;
+    settings.gi.cone.rtShadows   = true;
+    EXPECT_FALSE(server.ValidateShadowResources(settings, rejectedFaces));
+    settings.gi.cone.rayProvider = rc::VoxelGISettings::RayProvider::Hardware;
     EXPECT_EQ(server.ValidateShadowResources(settings, rejectedFaces), hardware);
     settings.debug.output = rc::DebugOutput::eShadow;
     EXPECT_FALSE(server.ValidateShadowResources(settings, rejectedFaces));

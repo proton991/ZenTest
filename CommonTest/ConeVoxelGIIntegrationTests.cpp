@@ -9,7 +9,6 @@
 #include <glm/gtc/packing.hpp>
 #include "Graphics/RenderCore/V2/Renderer/GBuffer.h"
 #include "Graphics/RenderCore/V2/Renderer/HybridGIRenderer.h"
-#include "Graphics/Shared/ScreenProbe.h"
 #include "Graphics/RenderCore/V2/ComputeDispatch.h"
 #include "Graphics/RenderCore/V2/Renderer/SceneCulling.h"
 #include "Graphics/RenderCore/V2/Renderer/ForwardDrawCache.h"
@@ -167,10 +166,9 @@ template <class T> HeapVector<T> ReadStaticBuffer(RHIBuffer* buffer)
 
 #include "ConeVoxelVisibilityTests.inl"
 #include "DistanceFieldIntegrationTests.inl"
-#include "ConeEnvironmentTests.inl"
 #include "HybridEstimatorTests.inl"
 #include "ReSTIRTests.inl"
-#include "ScreenProbeGatherIntegrationTests.inl"
+#include "HybridDenoiseIntegrationTests.inl"
 #include "CompactGBufferTests.inl"
 #include "SceneGeometryUpdatesTests.inl"
 #include "SceneCullingTests.inl"

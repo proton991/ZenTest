@@ -6,6 +6,9 @@
 #include "Graphics/RenderCore/V2/Renderer/VoxelGIRenderer.h"
 #include "Graphics/RenderCore/V2/Renderer/HybridGIRenderer.h"
 #include "Graphics/Shared/ReSTIRGI.h"
+#include "Graphics/Shared/LightingCapture.h"
+#include "Graphics/RenderCore/V2/Renderer/RendererServer.h"
+#include "Graphics/RenderCore/V2/Renderer/DeferredLightingRenderer.h"
 #include "Graphics/Shared/EnvironmentSampling.h"
 #include "Graphics/RenderCore/V2/RenderScene.h"
 #include "Graphics/RHI/RHIGPUFrameTiming.h"
@@ -14,6 +17,7 @@
 #include "Graphics/VulkanRHI/VulkanAccelerationStructure.h"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <bit>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -81,6 +85,17 @@ protected:
             ShaderProgramManager::GetInstance().StoreProgram(
                 ZEN_NEW() ComputeFileSP(device, "SceneRayQueryCheckSP", "VoxelGI/Calibration/scene_ray_query_check.comp.spv"));
         }
+        if (device->GetGPUInfo().rayTracing.IsUsable())
+        {
+            const HeapVector<ShaderProgram::StageFile> modules = {
+                {RHIShaderStage::eRayGeneration, "VoxelGI/Calibration/scene_rt_check.rgen.spv"},
+                {RHIShaderStage::eMiss, "VoxelGI/Calibration/scene_rt_check.rmiss.spv"},
+                {RHIShaderStage::eClosestHit, "VoxelGI/Calibration/scene_rt_check.rchit.spv"},
+                {RHIShaderStage::eAnyHit, "VoxelGI/Calibration/scene_rt_check.rahit.spv"}};
+            ShaderProgramManager::GetInstance().StoreProgram(ZEN_NEW() RayTracingFileSP(device, "SceneRTCheckSP", modules));
+            ShaderProgramManager::GetInstance().StoreProgram(
+                ZEN_NEW() RayTracingFileSP(device, "SceneRTPlainCheckSP", modules, false));
+        }
     }
 
     void TearDown() override
@@ -144,7 +159,7 @@ protected:
         return result;
     }
 
-    void CheckQueryQueue(const RenderGraph& graph) const
+    void CheckQueryQueue(const RenderGraph& graph, uint32_t expectedQueries = 1) const
     {
         const bool compute = device->GetAsyncComputeStatus() == AsyncComputeStatus::eAvailable;
 
@@ -165,7 +180,7 @@ protected:
             }
         }
 
-        EXPECT_EQ(queries, 1u);
+        EXPECT_EQ(queries, expectedQueries);
     }
 
     void AllocateBuildScratch(RHIAccelerationStructureBuildInfo& build)
@@ -237,6 +252,74 @@ protected:
             EXPECT_EQ(result[0].w, float(queries.GetGeneration()));
         }
         readback->Unmap();
+    }
+
+    RHIBuffer* RecordScenePipelineCheck(RenderGraph&   graph,
+                                        RenderScene&   scene,
+                                        SceneRayQuery& queries,
+                                        Vec4           worldOffset,
+                                        bool           indirect,
+                                        bool           reorder)
+    {
+        RHIBuffer* readback = nullptr;
+        if (device->GetGPUInfo().rayTracing.IsUsable())
+        {
+            BitField<RHIBufferUsageFlagBits> usage;
+            usage.SetFlags(RHIBufferUsageFlagBits::eStorageBuffer, RHIBufferUsageFlagBits::eTransferSrcBuffer);
+            RHIBuffer* output = Buffer(4 * sizeof(Vec4), usage, nullptr, RHIBufferAllocateType::eGPU);
+            readback = Buffer(4 * sizeof(Vec4), BitField<RHIBufferUsageFlagBits>(RHIBufferUsageFlagBits::eTransferDstBuffer),
+                              nullptr, RHIBufferAllocateType::eCPURead);
+            EXPECT_NE(output, nullptr);
+            EXPECT_NE(readback, nullptr);
+            if (output != nullptr && readback != nullptr)
+            {
+                RDGRayTracingPassDesc pass;
+                pass.SetShaderProgramName(reorder ? "SceneRTCheckSP" : "SceneRTPlainCheckSP");
+                pass.SetPassTag("SceneRTPipelineCheck");
+                pass.SetQueuePreference(RDGQueuePreference::ePreferAsyncCompute);
+                pass.SetShaderGroups({{RHIRayTracingShaderGroupType::eRayGeneration, 0},
+                                      {RHIRayTracingShaderGroupType::eMiss, 1},
+                                      {RHIRayTracingShaderGroupType::eHit, kUnusedRayTracingShader, 2, 3}});
+                pass.BindStorageBuffer("Results", output, RDGContentGuarantee::eFullWrite);
+                const Vec4 gi[] = {Vec4(0, 0, 0, 1), Vec4(64), Vec4(0), Vec4(0), Vec4(0), Vec4(1, 0, 0, 0)};
+                pass.BindValue("uGISettings", gi, sizeof(gi));
+                pass.BindValue("uSceneData", scene.GetSceneUniformData(), sizeof(SceneUniformData));
+                queries.BindInputs(pass, scene);
+                RHIBuffer* arguments = nullptr;
+                if (indirect && device->GetGPUInfo().rayTracing.indirect)
+                {
+                    const uint32_t                   dimensions[] = {0, 4, 1, 1};
+                    BitField<RHIBufferUsageFlagBits> indirectUsage;
+                    indirectUsage.SetFlags(RHIBufferUsageFlagBits::eIndirectBuffer, RHIBufferUsageFlagBits::eDeviceAddress);
+                    arguments = Buffer(sizeof(dimensions), indirectUsage, dimensions);
+                    EXPECT_NE(arguments, nullptr);
+                    if (arguments != nullptr)
+                    {
+                        graph.GetResourceManager()->ImportBuffer(arguments, RDGImportContents::eDefined);
+                        pass.UseIndirectBuffer(arguments);
+                    }
+                }
+                graph.AddRayTracingPass(std::move(pass))
+                    .RecordPassCommands([worldOffset, arguments](RDGPassCmdEncoder& encoder) {
+                        TraceScenePipeline(encoder, worldOffset, arguments);
+                    });
+                graph.AddTransferPass("ReadScenePipelineResults").CopyBuffer(output, readback, {0, 0, 4 * sizeof(Vec4)});
+            }
+        }
+        return readback;
+    }
+
+    static void TraceScenePipeline(RDGPassCmdEncoder& encoder, Vec4 worldOffset, RHIBuffer* arguments)
+    {
+        encoder.SetPushConstants(worldOffset);
+        if (arguments != nullptr)
+        {
+            encoder.TraceRaysIndirect(arguments, sizeof(uint32_t));
+        }
+        else
+        {
+            encoder.TraceRays(4, 1);
+        }
     }
 
     void Query(RenderGraph& graph, RHIAccelerationStructure* tlas, RHIBuffer* output)
@@ -429,6 +512,8 @@ TEST_P(RayQueryIntegrationTest, SceneSnapshotsTrackOpacityDeformationMotionAndRe
                 encoder.Dispatch(4, 1, 1);
             });
             graph.AddTransferPass("ReadSceneQueries").CopyBuffer(output, readback, {0, 0, 4 * sizeof(Vec4)});
+            RHIBuffer* pipelineReadback =
+                RecordScenePipelineCheck(graph, scene, queries, queryOffset, (frame & 1u) != 0, (frame & 2u) != 0);
             ASSERT_TRUE(graph.End()) << graph.GetResult().message;
             const bool succeeded = device->ExecuteRenderGraph(graph);
             queries.OnRenderGraphExecuted(succeeded ? RenderFrameResult::eSubmitted : RenderFrameResult::eFailed);
@@ -450,6 +535,21 @@ TEST_P(RayQueryIntegrationTest, SceneSnapshotsTrackOpacityDeformationMotionAndRe
             }
             EXPECT_EQ(result[0].w, float(queries.GetGeneration()));
             EXPECT_EQ(queries.GetGeneration(), frame >= 6 ? frame - 5u : frame + 1u);
+            if (device->GetGPUInfo().rayTracing.IsUsable())
+            {
+                ASSERT_NE(pipelineReadback, nullptr);
+                const Vec4* pipelineResult = reinterpret_cast<const Vec4*>(pipelineReadback->Map());
+                ASSERT_NE(pipelineResult, nullptr);
+                for (uint32_t ray = 0; ray < 4; ++ray)
+                {
+                    SCOPED_TRACE(ray);
+                    for (uint32_t channel = 0; channel < 4; ++channel)
+                    {
+                        EXPECT_NEAR(pipelineResult[ray][channel], result[ray][channel], 1e-5f);
+                    }
+                }
+                pipelineReadback->Unmap();
+            }
             readback->Unmap();
         }
         EXPECT_FALSE(queries.BuildRenderGraph(scene, 1));
@@ -876,6 +976,12 @@ protected:
     }
 };
 
+#include "ForwardBlendFixture.inl"
+#include "RayForwardBlendTests.inl"
+#include "RayGITraceTests.inl"
+#include "RayOriginTests.inl"
+#include "GICacheTests.inl"
+#include "HybridGIPassListTests.inl"
 #include "ReSTIRRayQueryTests.inl"
 #include "DistanceFieldSceneTests.inl"
 #include "DistanceFieldDiagnostics.inl"

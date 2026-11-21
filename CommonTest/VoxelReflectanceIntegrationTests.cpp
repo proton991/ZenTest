@@ -47,7 +47,7 @@ TEST_P(VoxelReflectanceIntegrationTest, RejectsSmallBudgetThenAppliesAndRendersB
     RHIOptions::GetInstance().SetRayTracingDisabled(true);
 
     rc::RenderDevice device(RHIAPIType::eVulkan, 2, (GetParam() & 1) ? RHIExecutionMode::eThreaded : RHIExecutionMode::eInline,
-                            platform::AsyncComputeMode::eAuto);
+                            (GetParam() & 2) ? platform::AsyncComputeMode::eAuto : platform::AsyncComputeMode::eDisabled);
 
     RHIViewport* viewport = device.CreateViewport(&window, 64, 64, false);
 
@@ -91,11 +91,10 @@ TEST_P(VoxelReflectanceIntegrationTest, RejectsSmallBudgetThenAppliesAndRendersB
 
         settings.resolution                 = resolution;
 
-        settings.voxelizer = (GetParam() & 2) ? platform::VoxelizerMode::eGeometry : platform::VoxelizerMode::eCompute;
 
-        settings.averagedReflectance    = false;
+        settings.averagedReflectance        = false;
 
-        settings.reflectanceBudgetBytes = 0;
+        settings.reflectanceBudgetBytes     = 0;
 
         ASSERT_TRUE(server.ApplyVoxelGISettings(settings));
 
