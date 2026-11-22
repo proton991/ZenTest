@@ -1,8 +1,6 @@
 # ZenTest
 
-Engine, renderer, editor, UI and Python regression tests for
-[ZenEngine](https://github.com/proton991/ZenEngine). Third-party dependency tests
-remain owned by their respective repositories.
+ZenTest contains component tests for ZenEngine. ZenFoundation and ZenRHI own their standalone suites. ZenEngine registers the cross-component suites and their fixtures from its own tests/integration directory.
 
 The engine includes this repository when `BUILD_TESTING=ON`. Initialize submodules
 with `git submodule update --init --recursive` before configuring ZenEngine.

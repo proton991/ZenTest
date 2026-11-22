@@ -1,3 +1,4 @@
+#include "Math/Math.h"
 #include "Editor/Model/EditorActions.h"
 #include "Editor/Model/EditorLog.h"
 #include "Editor/Model/EditorPreferences.h"

@@ -1,3 +1,4 @@
+#include "Math/Math.h"
 #include "Editor/Model/EditorRenderingState.h"
 #include <gtest/gtest.h>
 #include <limits>

@@ -1,3 +1,4 @@
+#include "Math/Math.h"
 #include "Platform/ConfigLoader.h"
 #include "Graphics/RenderCore/V2/RenderConfig.h"
 #include <gtest/gtest.h>

@@ -1,3 +1,4 @@
+#include "Math/Math.h"
 #include "Editor/Model/EditorEnvironment.h"
 #include "Editor/Model/EditorText.h"
 #include "AssetLib/TextureLoader.h"
